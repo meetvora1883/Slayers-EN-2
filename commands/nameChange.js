@@ -1,4 +1,3 @@
-// commands/nameChange.js
 const { EmbedBuilder } = require('discord.js');
 const { sanitizeName, extractNameAndID } = require('./utilities');
 
@@ -8,116 +7,121 @@ module.exports = {
     try {
       const { content, author, member, guild, channel } = message;
       
-      // Check if message is in role request channel
+      // Check channel
       if (channel.id !== process.env.ROLE_REQUEST_CHANNEL) return;
 
-      // Check if user mentioned someone instead of typing name
+      // Handle mentions
       if (message.mentions.users.size > 0) {
-        await message.react('❌');
-        
-        const dmEmbed = new EmbedBuilder()
-          .setTitle('Invalid Role Request Format')
-          .setDescription('You mentioned a user instead of typing the name. Please use the correct format:')
-          .addFields(
-            { name: 'Correct Format', value: 'Name\nID\nRank' },
-            { name: 'Your Message', value: `[Jump to Message](${message.url})` }
-          )
-          .setColor(0xFF0000)
-          .setFooter({ text: 'Please delete your incorrect request and submit a new one' });
-        
-        await author.send({ embeds: [dmEmbed] });
+        await sendInvalidFormatDM(message, 'You mentioned a user instead of typing the name');
         return;
       }
 
-      // Extract name and ID with flexible separators
+      // Extract name and ID
       const { name, id } = extractNameAndID(content);
-      
       if (!name || !id) {
-        console.log(`[FORMAT ERROR] Invalid format from ${author.tag}: ${content}`);
-        await handleInvalidRequest(message, author);
+        await sendInvalidFormatDM(message, 'Invalid format. Use: Name\nID\nRank or Name - ID');
         return;
       }
 
+      // Sanitize and format
       const sanitizedName = sanitizeName(name);
       const newNickname = `${sanitizedName} | ${id}`;
 
-      // Permission checks
-      if (member.permissions.has('Administrator')) {
-        console.warn(`[ADMIN BLOCK] Admin ${author.tag} tried to change nickname`);
-        return;
-      }
+      // Check permissions
+      if (!(await checkPermissions(member, guild))) return;
 
-      if (!guild.members.me.permissions.has('ManageNicknames')) {
-        console.error('[PERMISSION ERROR] Bot lacks ManageNicknames permission');
-        return;
-      }
-
-      if (member.roles.highest.position >= guild.members.me.roles.highest.position) {
-        console.warn(`[HIERARCHY WARNING] ${author.tag}'s role is above bot`);
-        return;
-      }
-
-      // Change nickname
+      // Update nickname
       const originalNickname = member.nickname || author.username;
-      await member.setNickname(newNickname, 'Role request nickname update');
-      console.log(`[NICKNAME CHANGE] ${author.tag}: ${originalNickname} → ${newNickname}`);
+      await member.setNickname(newNickname);
+      console.log(`[NICKNAME] ${author.tag}: ${originalNickname} → ${newNickname}`);
 
-      // Send success DM
-      const successEmbed = new EmbedBuilder()
-        .setTitle('Nickname Updated Successfully')
-        .setDescription(`Your nickname in **${guild.name}** has been updated`)
-        .addFields(
-          { name: 'Original', value: originalNickname },
-          { name: 'New Nickname', value: newNickname },
-          { name: 'Request Message', value: `[View Original](${message.url})` }
-        )
-        .setColor(0x00FF00)
-        .setFooter({ text: 'You may delete your original request message now' });
-
-      await author.send({ embeds: [successEmbed] });
-
-      // Log to channel
-      const logEmbed = new EmbedBuilder()
-        .setTitle('Nickname Updated')
-        .setColor(0x3498db)
-        .addFields(
-          { name: 'User', value: author.toString(), inline: true },
-          { name: 'Before', value: originalNickname, inline: true },
-          { name: 'After', value: newNickname, inline: true }
-        )
-        .setTimestamp();
-
-      const logChannel = guild.channels.cache.get(process.env.LOG_CHANNEL);
-      if (logChannel) {
-        await logChannel.send({ embeds: [logEmbed] });
-      }
+      // Send confirmations
+      await sendSuccessDM(message, originalNickname, newNickname);
+      await logChange(guild, author, originalNickname, newNickname);
 
     } catch (error) {
-      console.error('[NICKNAME ERROR]', error);
-      const logChannel = message.guild.channels.cache.get(process.env.LOG_CHANNEL);
-      if (logChannel) {
-        await logChannel.send(`❌ Error processing nickname change for ${message.author.toString()}: ${error.message}`);
-      }
+      console.error('[ERROR]', error);
+      await logError(guild, author, error.message);
     }
   }
 };
 
-async function handleInvalidRequest(message, author) {
-  await message.react('❌');
-  
-  const dmEmbed = new EmbedBuilder()
-    .setTitle('Incorrect Role Request Format')
-    .setDescription('Please use the following format:')
-    .addFields(
-      { name: 'Correct Format', value: 'Name\nID\nRank' },
-      { name: 'Example', value: 'John Doe\n123456\n3' },
-      { name: 'Your Message', value: `\`\`\`${message.content}\`\`\`` }
-    )
-    .setColor(0xFFA500)
-    .setFooter({ text: 'Please delete your message and submit a new request with the correct format' });
+async function checkPermissions(member, guild) {
+  if (member.permissions.has('Administrator')) {
+    console.warn(`[ADMIN] ${member.user.tag} tried nickname change`);
+    return false;
+  }
 
-  await author.send({ 
-    content: `Here's your original message for reference:`,
-    embeds: [dmEmbed] 
-  });
+  if (!guild.members.me.permissions.has('ManageNicknames')) {
+    await logToChannel(guild, '❌ Bot lacks nickname permissions');
+    return false;
+  }
+
+  if (member.roles.highest.position >= guild.members.me.roles.highest.position) {
+    await logToChannel(guild, `⚠️ Cannot change ${member.toString()} (role hierarchy)`);
+    return false;
+  }
+
+  return true;
+}
+
+async function sendInvalidFormatDM(message, reason) {
+  try {
+    await message.react('❌');
+    const embed = new EmbedBuilder()
+      .setTitle('❌ Invalid Format')
+      .setDescription(`${reason}\n\n**Correct Formats:**\n\`Name\nID\nRank\`\nor\n\`Name - ID\``)
+      .addFields({ name: 'Example', value: 'John Doe\n12345\n3' })
+      .setColor(0xFFA500);
+
+    await message.author.send({ 
+      content: `Your message: \`\`\`${message.content}\`\`\``,
+      embeds: [embed] 
+    });
+  } catch (error) {
+    console.error('[DM ERROR]', error);
+  }
+}
+
+async function sendSuccessDM(message, oldName, newName) {
+  try {
+    const embed = new EmbedBuilder()
+      .setTitle('✅ Nickname Updated')
+      .addFields(
+        { name: 'Old Name', value: oldName },
+        { name: 'New Name', value: newName }
+      )
+      .setColor(0x00FF00);
+
+    await message.author.send({ 
+      content: `[Original Request](${message.url})`,
+      embeds: [embed] 
+    });
+  } catch (error) {
+    console.error('[DM ERROR]', error);
+  }
+}
+
+async function logChange(guild, author, oldName, newName) {
+  const embed = new EmbedBuilder()
+    .setTitle('Nickname Changed')
+    .addFields(
+      { name: 'User', value: author.toString() },
+      { name: 'Before', value: oldName },
+      { name: 'After', value: newName }
+    )
+    .setColor(0x3498db)
+    .setTimestamp();
+
+  await logToChannel(guild, { embeds: [embed] });
+}
+
+async function logError(guild, author, error) {
+  await logToChannel(guild, `❌ Error for ${author.toString()}: ${error}`);
+}
+
+async function logToChannel(guild, content) {
+  if (!process.env.LOG_CHANNEL) return;
+  const channel = guild.channels.cache.get(process.env.LOG_CHANNEL);
+  if (channel) await channel.send(content).catch(console.error);
 }
