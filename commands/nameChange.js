@@ -1,85 +1,89 @@
 const { EmbedBuilder } = require('discord.js');
-const { sanitizeName, extractNameAndID } = require('./utilities');
+const { sanitizeName, extractNameAndID, formatOutput } = require('./utilities');
 
 module.exports = {
   name: 'nameChange',
   async execute(message, client) {
+    // Destructure message properties
+    const { content, author, member, guild, channel } = message;
+    
     try {
-      const { content, author, member, guild, channel } = message;
+      // 1. Channel Validation
+      if (channel.id !== process.env.ROLE_REQUEST_CHANNEL) {
+        console.log(`[CHANNEL REJECT] ${author.tag} tried in #${channel.name}`);
+        return;
+      }
+
+      // 2. Content Extraction and Validation
+      const { name, id, rank, normalized } = extractNameAndID(content);
       
-      // Check channel
-      if (channel.id !== process.env.ROLE_REQUEST_CHANNEL) return;
-
-      // Handle mentions
-      if (message.mentions.users.size > 0) {
-        await sendInvalidFormatDM(message, 'You mentioned a user instead of typing the name');
-        return;
-      }
-
-      // Extract name and ID
-      const { name, id } = extractNameAndID(content);
       if (!name || !id) {
-        await sendInvalidFormatDM(message, 'Invalid format. Use: Name\nID\nRank or Name - ID');
+        console.log(`[FORMAT REJECT] ${author.tag}: "${content}"`);
+        await sendInvalidFormatDM(message);
+        await message.react('❌');
         return;
       }
 
-      // Sanitize and format
-      const sanitizedName = sanitizeName(name);
-      const newNickname = `${sanitizedName} | ${id}`;
+      // 3. Permission Checks
+      if (!(await checkPermissions(member, guild))) {
+        console.log(`[PERMISSION REJECT] ${author.tag}`);
+        return;
+      }
 
-      // Check permissions
-      if (!(await checkPermissions(member, guild))) return;
-
-      // Update nickname
-      const originalNickname = member.nickname || author.username;
+      // 4. Nickname Processing
+      const originalName = member.nickname || author.username;
+      const newNickname = formatOutput(name, id);
+      
       await member.setNickname(newNickname);
-      console.log(`[NICKNAME] ${author.tag}: ${originalNickname} → ${newNickname}`);
+      console.log(`[NICKNAME UPDATE] ${author.tag}: ${originalName} → ${newNickname}`);
 
-      // Send confirmations
-      await sendSuccessDM(message, originalNickname, newNickname);
-      await logChange(guild, author, originalNickname, newNickname);
+      // 5. Success Responses
+      await message.react('✅');
+      await sendSuccessDM(message, originalName, newNickname);
+      await logChange(guild, author, originalName, newNickname);
 
     } catch (error) {
-      console.error('[ERROR]', error);
-      await logError(guild, author, error.message);
+      console.error(`[ERROR] ${author.tag}:`, error);
+      await handleError(guild, author, error);
     }
   }
 };
 
+// Helper Functions
+
 async function checkPermissions(member, guild) {
   if (member.permissions.has('Administrator')) {
-    console.warn(`[ADMIN] ${member.user.tag} tried nickname change`);
+    await logToChannel(guild, `⚠️ Admin bypass: ${member.toString()}`);
     return false;
   }
 
   if (!guild.members.me.permissions.has('ManageNicknames')) {
-    await logToChannel(guild, '❌ Bot lacks nickname permissions');
-    return false;
-  }
-
-  if (member.roles.highest.position >= guild.members.me.roles.highest.position) {
-    await logToChannel(guild, `⚠️ Cannot change ${member.toString()} (role hierarchy)`);
+    await logToChannel(guild, '❌ Bot missing "ManageNicknames" permission');
     return false;
   }
 
   return true;
 }
 
-async function sendInvalidFormatDM(message, reason) {
+async function sendInvalidFormatDM(message) {
   try {
-    await message.react('❌');
     const embed = new EmbedBuilder()
-      .setTitle('❌ Invalid Format')
-      .setDescription(`${reason}\n\n**Correct Formats:**\n\`Name\nID\nRank\`\nor\n\`Name - ID\``)
-      .addFields({ name: 'Example', value: 'John Doe\n12345\n3' })
-      .setColor(0xFFA500);
+      .setTitle('❌ Invalid Name Format')
+      .setDescription([
+        '**Correct Formats:**',
+        '```name: YourName\nid: 123456\nrank: 3```',
+        '```YourName - 123456 - 3```',
+        '```YourName | 123456```'
+      ].join('\n'))
+      .addFields({
+        name: 'Your Message',
+        value: `\`\`\`${message.content}\`\`\``
+      })
+      .setColor(0xFF0000);
 
-    await message.author.send({ 
-      content: `Your message: \`\`\`${message.content}\`\`\``,
-      embeds: [embed] 
-    });
-  } catch (error) {
-    console.error('[DM ERROR]', error);
+    await message.author.send({ embeds: [embed] });
+  } catch (dmError) {
+    console.error('[DM FAILURE]', dmError);
   }
 }
 
@@ -88,40 +92,48 @@ async function sendSuccessDM(message, oldName, newName) {
     const embed = new EmbedBuilder()
       .setTitle('✅ Nickname Updated')
       .addFields(
-        { name: 'Old Name', value: oldName },
-        { name: 'New Name', value: newName }
+        { name: 'Previous', value: oldName, inline: true },
+        { name: 'Updated', value: newName, inline: true }
       )
-      .setColor(0x00FF00);
+      .setColor(0x00FF00)
+      .setFooter({ text: `Requested in #${message.channel.name}` });
 
     await message.author.send({ 
-      content: `[Original Request](${message.url})`,
+      content: `[Original Message](${message.url})`,
       embeds: [embed] 
     });
-  } catch (error) {
-    console.error('[DM ERROR]', error);
+  } catch (dmError) {
+    console.error('[DM FAILURE]', dmError);
   }
 }
 
-async function logChange(guild, author, oldName, newName) {
+async function logChange(guild, user, oldName, newName) {
+  if (!process.env.LOG_CHANNEL) return;
+  
   const embed = new EmbedBuilder()
+    .setAuthor({ name: user.tag, iconURL: user.displayAvatarURL() })
     .setTitle('Nickname Changed')
     .addFields(
-      { name: 'User', value: author.toString() },
+      { name: 'User', value: user.toString() },
       { name: 'Before', value: oldName },
       { name: 'After', value: newName }
     )
-    .setColor(0x3498db)
+    .setColor(0x3498DB)
     .setTimestamp();
 
   await logToChannel(guild, { embeds: [embed] });
 }
 
-async function logError(guild, author, error) {
-  await logToChannel(guild, `❌ Error for ${author.toString()}: ${error}`);
+async function handleError(guild, user, error) {
+  await logToChannel(guild, `❌ Error for ${user.toString()}: ${error.message}`);
+  try {
+    await user.send('⚠️ An error occurred processing your request. Please try again later.');
+  } catch {}
 }
 
 async function logToChannel(guild, content) {
-  if (!process.env.LOG_CHANNEL) return;
   const channel = guild.channels.cache.get(process.env.LOG_CHANNEL);
-  if (channel) await channel.send(content).catch(console.error);
+  if (channel) {
+    await channel.send(content).catch(console.error);
+  }
 }
