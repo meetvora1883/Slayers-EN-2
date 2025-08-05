@@ -1,0 +1,17 @@
+{
+  "name": "discord-nickname-bot",
+  "version": "1.0.0",
+  "description": "Custom Discord bot for nickname management",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.13.0",
+    "dotenv": "^16.3.1",
+    "mongoose": "^8.0.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
