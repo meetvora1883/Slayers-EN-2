@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Discord Bot Status</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/vanta@latest/dist/vanta.net.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: 'Arial', sans-serif;
+            overflow: hidden;
+            color: white;
+        }
+        #vanta-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: -1;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            text-align: center;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+        .status-card {
+            background: rgba(0, 0, 0, 0.7);
+            border-radius: 15px;
+            padding: 30px;
+            max-width: 600px;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+            backdrop-filter: blur(5px);
+            animation: float 6s ease-in-out infinite;
+        }
+        h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            text-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
+        }
+        .status-indicator {
+            display: inline-block;
+            width: 15px;
+            height: 15px;
+            border-radius: 50%;
+            background-color: #4CAF50;
+            margin-right: 10px;
+            animation: pulse 2s infinite;
+        }
+        .ip-list {
+            text-align: left;
+            margin-top: 20px;
+            background: rgba(0, 0, 0, 0.4);
+            padding: 15px;
+            border-radius: 10px;
+        }
+        .bot-avatar {
+            width: 100px;
+            height: 100px;
+            border-radius: 50%;
+            margin-bottom: 20px;
+            border: 3px solid white;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
+            transition: transform 0.3s;
+        }
+        .bot-avatar:hover {
+            transform: scale(1.1) rotate(10deg);
+        }
+        @keyframes float {
+            0% { transform: translateY(0px); }
+            50% { transform: translateY(-20px); }
+            100% { transform: translateY(0px); }
+        }
+        @keyframes pulse {
+            0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(76, 175, 80, 0.7); }
+            70% { transform: scale(1.1); box-shadow: 0 0 0 10px rgba(76, 175, 80, 0); }
+            100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(76, 175, 80, 0); }
+        }
+        .stats {
+            display: flex;
+            justify-content: space-around;
+            margin-top: 20px;
+        }
+        .stat-item {
+            padding: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div id="vanta-canvas"></div>
+    <div class="container">
+        <div class="status-card">
+            <img src="https://i.imgur.com/JKqY3Ee.png" alt="Bot Avatar" class="bot-avatar">
+            <h1>Discord Bot Status</h1>
+            <p><span class="status-indicator"></span> <strong>Operational</strong></p>
+            <p>Nickname management service is running normally</p>
+            
+            <div class="ip-list">
+                <h3>Static Outbound IP Addresses:</h3>
+                <ul>
+                    <li>52.41.36.82</li>
+                    <li>54.191.253.12</li>
+                    <li>44.226.122.3</li>
+                </ul>
+            </div>
+            
+            <div class="stats">
+                <div class="stat-item">
+                    <h3>Uptime</h3>
+                    <p id="uptime">00:00:00</p>
+                </div>
+                <div class="stat-item">
+                    <h3>Requests</h3>
+                    <p id="requests">0</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Initialize Vanta.js 3D background
+        VANTA.NET({
+            el: "#vanta-canvas",
+            mouseControls: true,
+            touchControls: true,
+            gyroControls: false,
+            minHeight: 200.00,
+            minWidth: 200.00,
+            scale: 1.00,
+            scaleMobile: 1.00,
+            color: 0x3a8bff,
+            backgroundColor: 0x11111,
+            points: 12.00,
+            maxDistance: 22.00,
+            spacing: 17.00
+        });
+
+        // Uptime counter
+        let startTime = Date.now();
+        function updateUptime() {
+            let seconds = Math.floor((Date.now() - startTime) / 1000);
+            let hours = Math.floor(seconds / 3600);
+            seconds %= 3600;
+            let minutes = Math.floor(seconds / 60);
+            seconds %= 60;
+            
+            document.getElementById('uptime').textContent = 
+                `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+        }
+        setInterval(updateUptime, 1000);
+
+        // Simple request counter (would be replaced with real stats in production)
+        let requestCount = 0;
+        setInterval(() => {
+            requestCount += Math.floor(Math.random() * 3);
+            document.getElementById('requests').textContent = requestCount;
+        }, 3000);
+    </script>
+</body>
+</html>
