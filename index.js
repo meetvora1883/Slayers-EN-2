@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 
-// Initialize Discord Client with validated intents
+// Initialize Discord Client
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -13,19 +13,21 @@ const client = new Client({
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessageTyping
-  ],
-  partials: ['MESSAGE', 'CHANNEL', 'REACTION']
+  ]
 });
 
-// ========================
-// 1. COMMAND LOADER
-// ========================
+// Global Collections
 client.commands = new Map();
+let httpServer;
 
-const loadCommands = () => {
+// ==========================================
+// 1. COMMAND LOADER
+// ==========================================
+function loadCommands() {
   try {
     const commandsPath = path.join(__dirname, 'commands');
-    const commandFiles = fs.readdirSync(commandsPath).filter(file => file.endsWith('.js'));
+    const commandFiles = fs.readdirSync(commandsPath)
+      .filter(file => file.endsWith('.js'));
 
     for (const file of commandFiles) {
       try {
@@ -44,15 +46,16 @@ const loadCommands = () => {
     console.error('[CRITICAL] Failed to load commands:', error);
     process.exit(1);
   }
-};
+}
 
-// ========================
+// ==========================================
 // 2. EVENT HANDLER LOADER
-// ========================
-const loadEvents = () => {
+// ==========================================
+function loadEvents() {
   try {
     const eventsPath = path.join(__dirname, 'events');
-    const eventFiles = fs.readdirSync(eventsPath).filter(file => file.endsWith('.js'));
+    const eventFiles = fs.readdirSync(eventsPath)
+      .filter(file => file.endsWith('.js'));
 
     for (const file of eventFiles) {
       try {
@@ -71,12 +74,12 @@ const loadEvents = () => {
     console.error('[CRITICAL] Failed to load events:', error);
     process.exit(1);
   }
-};
+}
 
-// ========================
+// ==========================================
 // 3. DATABASE CONNECTION
-// ========================
-const connectDB = async () => {
+// ==========================================
+async function connectDB() {
   try {
     await mongoose.connect(process.env.MONGODB_URI, {
       serverSelectionTimeoutMS: 5000,
@@ -87,67 +90,106 @@ const connectDB = async () => {
     console.error('[DATABASE ERROR] Connection failed:', error);
     process.exit(1);
   }
-};
+}
 
-// ========================
+// ==========================================
 // 4. HEALTH CHECK SERVER
-// ========================
-const startHealthServer = () => {
-  const server = http.createServer((req, res) => {
+// ==========================================
+function startHealthServer() {
+  httpServer = http.createServer((req, res) => {
     if (req.url === '/health') {
-      res.writeHead(200).end(JSON.stringify({
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
         status: 'online',
         uptime: process.uptime(),
         guilds: client.guilds?.cache.size || 0
       }));
     } else {
-      res.writeHead(200).end(fs.readFileSync(path.join(__dirname, 'health.html')));
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(fs.readFileSync(path.join(__dirname, 'health.html')));
     }
   });
 
-  server.listen(process.env.PORT || 3000, () => {
+  httpServer.listen(process.env.PORT || 3000, () => {
     console.log(`[HEALTH] Server running on port ${process.env.PORT || 3000}`);
   });
 
-  server.on('error', (error) => {
+  httpServer.on('error', (error) => {
     console.error('[SERVER ERROR]', error);
   });
-};
+}
 
-// ========================
-// 5. BOT STARTUP SEQUENCE
-// ========================
-const startBot = async () => {
+// ==========================================
+// 5. GRACEFUL SHUTDOWN HANDLER
+// ==========================================
+function handleShutdown() {
+  console.log('\n[SHUTDOWN] Received termination signal');
+
+  // 1. Close HTTP server
+  if (httpServer) {
+    httpServer.close(() => {
+      console.log('[SHUTDOWN] HTTP server closed');
+    });
+  }
+
+  // 2. Disconnect from Discord
+  if (client && client.isReady()) {
+    client.destroy();
+    console.log('[SHUTDOWN] Discord connection closed');
+  }
+
+  // 3. Disconnect from MongoDB
+  mongoose.disconnect()
+    .then(() => {
+      console.log('[SHUTDOWN] MongoDB connection closed');
+      process.exit(0);
+    })
+    .catch(err => {
+      console.error('[SHUTDOWN ERROR] MongoDB disconnection failed:', err);
+      process.exit(1);
+    });
+}
+
+// ==========================================
+// 6. BOT STARTUP SEQUENCE
+// ==========================================
+async function startBot() {
   try {
+    console.log('[STARTUP] Initializing bot...');
+
+    // Load components
     loadCommands();
     loadEvents();
     await connectDB();
     startHealthServer();
 
-    client.login(process.env.TOKEN)
-      .then(() => console.log('[LOGIN] Bot is connecting to Discord...'))
-      .catch(error => {
-        console.error('[LOGIN ERROR]', error);
-        process.exit(1);
-      });
+    // Start Discord client
+    await client.login(process.env.TOKEN);
+    console.log(`[LOGIN] Connected as ${client.user.tag}`);
+
+    // Set up shutdown handlers
+    process.on('SIGTERM', handleShutdown);
+    process.on('SIGINT', handleShutdown);
 
   } catch (error) {
     console.error('[STARTUP FAILURE]', error);
     process.exit(1);
   }
-};
+}
 
-// ========================
-// GLOBAL ERROR HANDLING
-// ========================
+// ==========================================
+// GLOBAL ERROR HANDLERS
+// ==========================================
 process.on('unhandledRejection', (error) => {
   console.error('[UNHANDLED REJECTION]', error);
 });
 
 process.on('uncaughtException', (error) => {
   console.error('[UNCAUGHT EXCEPTION]', error);
-  process.exit(1);
+  handleShutdown();
 });
 
-// Start the bot
+// ==========================================
+// START THE BOT
+// ==========================================
 startBot();
