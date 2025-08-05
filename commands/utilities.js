@@ -1,48 +1,42 @@
 module.exports = {
   sanitizeName: (name) => {
+    if (!name) return '';
     return name
-      .replace(/[^\p{L}\s-]/gu, '')  // Keep letters, spaces, hyphens
-      .replace(/\s+/g, ' ')          // Collapse multiple spaces
-      .replace(/-+/g, '-')           // Remove repeated hyphens
+      .replace(/[^\p{L}\s-]/gu, '')  // Keep letters/spaces/hyphens
+      .replace(/\s+/g, ' ')          // Collapse spaces
+      .replace(/-+/g, '-')           // Normalize hyphens
       .trim()
-      .slice(0, 32);                // Limit to 32 chars
+      .slice(0, 32);                 // Limit length
   },
 
   extractNameAndID: (content) => {
-    // Trim and normalize input
-    const text = content.trim();
+    if (!content) return { name: null, id: null, rank: null, normalized: null };
 
-    // Case 1: Handle "Name | ID" format (e.g., "Patel Slayers | 123456")
-    const pipeFormat = text.match(/^(.+?)\s*\|\s*(\d+)$/);
-    if (pipeFormat) {
+    // Normalization phase (handles all spacing/separator variations)
+    const normalized = content
+      .replace(/\s*[:=-]\s*/g, ':')  // Convert all separators to colons
+      .replace(/\s+/g, ' ')          // Collapse multiple spaces
+      .trim();
+
+    console.log(`[NORMALIZED] "${content}" → "${normalized}"`);
+
+    // Master pattern (works after normalization)
+    const masterPattern = /^(?:name:)?(.+?)(?::|$)(\d+)(?::(\d+))?$/i;
+    const match = normalized.match(masterPattern);
+
+    if (match) {
       return {
-        name: pipeFormat[1].trim(),
-        id: pipeFormat[2].trim(),
-        rank: null
+        name: match[1]?.trim() || null,
+        id: match[2]?.trim() || null,
+        rank: match[3]?.trim() || null,
+        normalized: normalized // Pass through for validation
       };
     }
 
-    // Case 2: Handle "Name - ID" or "Name: ID" (fallback)
-    const separatorFormat = text.match(/^(.+?)\s*[:-]\s*(\d+)$/);
-    if (separatorFormat) {
-      return {
-        name: separatorFormat[1].trim(),
-        id: separatorFormat[2].trim(),
-        rank: null
-      };
-    }
+    return { name: null, id: null, rank: null, normalized: null };
+  },
 
-    // Case 3: Multi-line format (Name\nID)
-    const lines = text.split('\n').map(line => line.trim());
-    if (lines.length >= 2 && /^\d+$/.test(lines[1])) {
-      return {
-        name: lines[0],
-        id: lines[1],
-        rank: lines[2] || null
-      };
-    }
-
-    // No match found
-    return { name: null, id: null, rank: null };
+  formatOutput: (name, id) => {
+    return `${this.sanitizeName(name)} | ${id}`;
   }
 };
