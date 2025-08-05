@@ -1,37 +1,45 @@
+// commands/utilities.js
 module.exports = {
+  /**
+   * Sanitizes a name by removing unwanted characters
+   * @param {string} name - The input name to sanitize
+   * @returns {string} The sanitized name
+   */
   sanitizeName: (name) => {
-    // Remove emojis
-    let cleaned = name.replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu, '');
-    
-    // Remove invisible characters
-    cleaned = cleaned.replace(/[\u200B-\u200D\uFEFF]/g, '');
-    
-    // Remove mentions
-    cleaned = cleaned.replace(/@(here|everyone|[!&]?[0-9]{17,20})/g, '');
-    
-    return cleaned.trim().slice(0, 32);
+    // Preserve spaces between names but remove other special chars
+    return name
+      .replace(/[^\p{L}\s-]/gu, '') // Only allow letters, spaces, and hyphens
+      .replace(/\s+/g, ' ')         // Collapse multiple spaces
+      .trim()
+      .slice(0, 32);
   },
 
+  /**
+   * Extracts name and ID from message content
+   * @param {string} content - The message content
+   * @returns {Object} {name, id} or {null, null} if invalid
+   */
   extractNameAndID: (content) => {
-    const separators = ['-', ':-', ':', ' -', ' :-', ' :', '- ', ':- ', ': ', ' - ', ' :- ', ' : '];
-    
-    for (const sep of separators) {
-      const parts = content.split(sep);
-      if (parts.length >= 2) {
-        return {
-          name: parts[0].trim(),
-          id: parts[1].trim().split(/\s+/)[0] // Get first word after separator
-        };
-      }
-    }
-
-    // Fallback to line-by-line parsing
-    const lines = content.split('\n').map(line => line.trim());
-    if (lines.length >= 2) {
+    // Try line-by-line format first
+    const lines = content.split('\n').map(line => line.trim()).filter(line => line);
+    if (lines.length >= 2 && /^\d+$/.test(lines[1])) {
       return {
         name: lines[0],
         id: lines[1]
       };
+    }
+
+    // Try separator format
+    const separators = ['-', ':-', ':', ' -', ' :-', ' :', '- ', ':- ', ': ', ' - ', ' :- ', ' : '];
+    ];
+    for (const sep of separators) {
+      const parts = content.split(sep).map(part => part.trim());
+      if (parts.length >= 2 && /^\d+$/.test(parts[1])) {
+        return {
+          name: parts[0],
+          id: parts[1]
+        };
+      }
     }
 
     return { name: null, id: null };
