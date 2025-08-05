@@ -1,17 +1,19 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits } = require('discord.js');
 const mongoose = require('mongoose');
-const fs = require('fs');
 
+// Corrected Client initialization
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.MessageReactions
+    GatewayIntentBits.GuildMessageTyping
   ]
 });
+
+// Rest of your index.js code remains the same...
 
 // Load commands
 client.commands = new Map();
