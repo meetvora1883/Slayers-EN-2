@@ -5,28 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 
-// Color codes for console output
-const colors = {
-  red: '\x1b[31m',
-  green: '\x1b[32m',
-  yellow: '\x1b[33m',
-  blue: '\x1b[34m',
-  magenta: '\x1b[35m',
-  cyan: '\x1b[36m',
-  reset: '\x1b[0m'
-};
-
-// ==========================================
-// 0. TOKEN VERIFICATION
-// ==========================================
-console.log(`${colors.cyan}[${new Date().toISOString()}] 🔍 Verifying environment variables...${colors.reset}`);
-
-if (!process.env.TOKEN) {
-  console.error(`${colors.red}[${new Date().toISOString()}] 🛑 FATAL: Missing DISCORD_TOKEN in .env file${colors.reset}`);
-  process.exit(1);
-}
-
-// Initialize Discord Client
+// Initialize Discord Client with commands collection
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -36,96 +15,111 @@ const client = new Client({
   ]
 });
 
+// Initialize collections BEFORE loading files
+client.commands = new Collection(); // Fix: Initialize here
+
 // ==========================================
-// 1. LOAD COMMANDS & EVENTS
+// 1. LOAD COMMANDS
 // ==========================================
-const loadFiles = (dir, type) => {
-  const files = fs.readdirSync(path.join(__dirname, dir))
+console.log('[BOOT] Loading commands...');
+try {
+  const commandsPath = path.join(__dirname, 'commands');
+  const commandFiles = fs.readdirSync(commandsPath)
+    .filter(file => file.endsWith('.js') && file !== 'utilities.js'); // Exclude utilities
+
+  for (const file of commandFiles) {
+    try {
+      const command = require(path.join(commandsPath, file));
+      
+      // Validate command structure
+      if (typeof command.name !== 'string' || typeof command.execute !== 'function') {
+        console.warn(`[WARNING] Invalid command in ${file} - missing name or execute`);
+        continue;
+      }
+      
+      client.commands.set(command.name, command);
+      console.log(`[LOADED] Command: ${command.name}`);
+    } catch (error) {
+      console.error(`[ERROR] Failed to load command ${file}:`, error.message);
+    }
+  }
+} catch (error) {
+  console.error('[CRITICAL] Failed to load commands:', error);
+  process.exit(1);
+}
+
+// ==========================================
+// 2. LOAD EVENTS
+// ==========================================
+console.log('[BOOT] Loading events...');
+try {
+  const eventsPath = path.join(__dirname, 'events');
+  const eventFiles = fs.readdirSync(eventsPath)
     .filter(file => file.endsWith('.js'));
 
-  files.forEach(file => {
+  for (const file of eventFiles) {
     try {
-      const req = require(path.join(__dirname, dir, file));
-      if (type === 'commands' && req.execute) {
-        client.commands.set(req.name, req);
-        console.log(`${colors.green}[${new Date().toISOString()}] ✅ Loaded ${type.slice(0, -1)}: ${req.name}${colors.reset}`);
-      } else if (type === 'events' && req.execute) {
-        client.on(req.name, (...args) => req.execute(...args, client));
-        console.log(`${colors.green}[${new Date().toISOString()}] ✅ Registered event: ${req.name}${colors.reset}`);
+      const event = require(path.join(eventsPath, file));
+      
+      if (typeof event.name !== 'string' || typeof event.execute !== 'function') {
+        console.warn(`[WARNING] Invalid event in ${file} - missing name or execute`);
+        continue;
       }
+      
+      if (event.once) {
+        client.once(event.name, (...args) => event.execute(...args, client));
+      } else {
+        client.on(event.name, (...args) => event.execute(...args, client));
+      }
+      console.log(`[LOADED] Event: ${event.name}`);
     } catch (error) {
-      console.error(`${colors.red}[${new Date().toISOString()}] ❌ Failed to load ${file}: ${error.message}${colors.reset}`);
+      console.error(`[ERROR] Failed to load event ${file}:`, error.message);
     }
-  });
-};
-
-console.log(`${colors.cyan}[${new Date().toISOString()}] 🔄 Loading commands...${colors.reset}`);
-loadFiles('./commands', 'commands');
-
-console.log(`${colors.cyan}[${new Date().toISOString()}] 🔄 Loading events...${colors.reset}`);
-loadFiles('./events', 'events');
+  }
+} catch (error) {
+  console.error('[CRITICAL] Failed to load events:', error);
+}
 
 // ==========================================
-// 2. DATABASE & SERVER SETUP
+// 3. START SERVICES
 // ==========================================
-const startServices = async () => {
+async function startServices() {
+  // Database connection
   if (process.env.MONGODB_URI) {
     try {
       await mongoose.connect(process.env.MONGODB_URI);
-      console.log(`${colors.green}[${new Date().toISOString()}] 🗄️  MongoDB connected${colors.reset}`);
+      console.log('[SUCCESS] MongoDB connected');
     } catch (error) {
-      console.error(`${colors.yellow}[${new Date().toISOString()}] ⚠️  MongoDB connection failed: ${error.message}${colors.reset}`);
+      console.error('[ERROR] MongoDB connection failed:', error.message);
     }
   }
 
+  // Health server
   http.createServer((req, res) => {
     res.writeHead(200, {'Content-Type': 'text/html'});
     res.end(fs.readFileSync('./health.html', 'utf8'));
   }).listen(process.env.PORT || 3000, () => {
-    console.log(`${colors.green}[${new Date().toISOString()}] 🌐 Health server running on port ${process.env.PORT || 3000}${colors.reset}`);
+    console.log(`[SERVER] Running on port ${process.env.PORT || 3000}`);
   });
-};
+}
 
 // ==========================================
-// 3. BOT LOGIN WITH ENHANCED ERROR HANDLING
+// 4. BOT LOGIN
 // ==========================================
-const startBot = async () => {
-  try {
-    await startServices();
-    
-    console.log(`${colors.cyan}[${new Date().toISOString()}] 🔑 Logging in to Discord...${colors.reset}`);
-    
-    await client.login(process.env.TOKEN)
-      .then(() => {
-        console.log(`${colors.green}[${new Date().toISOString()}] 🤖 Logged in as ${client.user.tag}${colors.reset}`);
-        console.log(`${colors.blue}[${new Date().toISOString()}] 🚀 Serving ${client.guilds.cache.size} guilds${colors.reset}`);
-      })
-      .catch(error => {
-        console.error(`${colors.red}[${new Date().toISOString()}] 🛑 Login failed: ${error.message}${colors.reset}`);
-        console.error(`${colors.red}[${new Date().toISOString()}] 🛑 Possible causes:${colors.reset}`);
-        console.error(`${colors.red}• Invalid/expired bot token${colors.reset}`);
-        console.error(`${colors.red}• Missing Gateway Intents${colors.reset}`);
-        console.error(`${colors.red}• Incorrect bot permissions${colors.reset}`);
-        process.exit(1);
-      });
-
-  } catch (error) {
-    console.error(`${colors.red}[${new Date().toISOString()}] 💥 Critical startup error: ${error.message}${colors.reset}`);
+client.login(process.env.TOKEN)
+  .then(() => {
+    console.log(`[DISCORD] Logged in as ${client.user.tag}`);
+    console.log(`[READY] Serving ${client.guilds.cache.size} guilds`);
+  })
+  .catch(error => {
+    console.error('[FATAL] Login failed:', error.message);
     process.exit(1);
-  }
-};
+  });
 
-// ==========================================
-// ERROR HANDLERS
-// ==========================================
+// Start all services
+startServices();
+
+// Error handling
 process.on('unhandledRejection', error => {
-  console.error(`${colors.red}[${new Date().toISOString()}] ⚠️  Unhandled rejection: ${error.message}${colors.reset}`);
+  console.error('[UNHANDLED]', error.message);
 });
-
-process.on('uncaughtException', error => {
-  console.error(`${colors.red}[${new Date().toISOString()}] 💥 Uncaught exception: ${error.message}${colors.reset}`);
-  process.exit(1);
-});
-
-// Start the bot
-startBot();
