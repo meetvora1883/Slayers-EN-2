@@ -1,44 +1,47 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits } = require('discord.js');
 const mongoose = require('mongoose');
-const http = require('http');
-const nameChange = require('./commands/nameChange');
+const fs = require('fs');
 
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.MessageReactions
   ]
 });
 
+// Load commands
+client.commands = new Map();
+const commandFiles = fs.readdirSync('./commands').filter(file => file.endsWith('.js'));
+
+for (const file of commandFiles) {
+  const command = require(`./commands/${file}`);
+  client.commands.set(command.name, command);
+}
+
+// Load events
+const eventFiles = fs.readdirSync('./events').filter(file => file.endsWith('.js'));
+
+for (const file of eventFiles) {
+  const event = require(`./events/${file}`);
+  if (event.once) {
+    client.once(event.name, (...args) => event.execute(...args, client));
+  } else {
+    client.on(event.name, (...args) => event.execute(...args, client));
+  }
+}
+
 // MongoDB Connection
 mongoose.connect(process.env.MONGODB_URI)
-  .then(() => console.log('Connected to MongoDB'))
-  .catch(err => console.error('MongoDB connection error:', err));
+  .then(() => console.log('[DATABASE] Successfully connected to MongoDB'))
+  .catch(err => console.error('[DATABASE ERROR] Connection failed:', err));
 
-// Discord Bot Ready Event
-client.once('ready', () => {
-  console.log(`Logged in as ${client.user.tag}!`);
+// Error Handling
+process.on('unhandledRejection', error => {
+  console.error('[UNHANDLED REJECTION]', error);
 });
 
-// Message Handling
-client.on('messageCreate', async message => {
-  if (message.channel.id === process.env.ROLE_REQUEST_CHANNEL && !message.author.bot) {
-    await nameChange.execute(message);
-  }
-});
-
-// Start Discord Bot
 client.login(process.env.TOKEN);
-
-// HTTP Server for Render Health Checks
-const server = http.createServer((req, res) => {
-  res.writeHead(200, {'Content-Type': 'text/html'});
-  res.end(require('fs').readFileSync('./health.html', 'utf8'));
-});
-
-server.listen(process.env.PORT, () => {
-  console.log(`Server running on port ${process.env.PORT}`);
-});
