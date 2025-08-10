@@ -1,10 +1,11 @@
 {
   "name": "discord-name-manager",
   "version": "1.0.0",
-  "description": "Discord bot for managing names based on roles",
+  "description": "Bot for managing user names based on roles",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {
     "discord.js": "^14.14.1",
