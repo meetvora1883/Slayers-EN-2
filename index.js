@@ -1,402 +1,494 @@
-require('dotenv').config();
-const { Client, IntentsBitField, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, AttachmentBuilder } = require('discord.js');
+const { Client, IntentsBitField, EmbedBuilder, AttachmentBuilder } = require('discord.js');
+const dotenv = require('dotenv');
 const fs = require('fs');
 const path = require('path');
+const csv = require('csv-parser');
+const { createObjectCsvWriter } = require('csv-writer');
+
+dotenv.config();
 
 const client = new Client({
-  intents: [
-    IntentsBitField.Flags.Guilds,
-    IntentsBitField.Flags.GuildMembers,
-    IntentsBitField.Flags.GuildMessages,
-    IntentsBitField.Flags.MessageContent,
-    IntentsBitField.Flags.DirectMessages
-  ]
+    intents: [
+        IntentsBitField.Flags.Guilds,
+        IntentsBitField.Flags.GuildMembers,
+        IntentsBitField.Flags.GuildMessages,
+        IntentsBitField.Flags.MessageContent,
+        IntentsBitField.Flags.DirectMessages
+    ]
 });
 
-// Environment variables
-const TOKEN = process.env.TOKEN;
-const ROLE_REQUEST_CHANNEL_ID = process.env.ROLE_REQUEST_CHANNEL_ID;
-const OUTPUT_CHANNEL_ID = process.env.OUTPUT_CHANNEL_ID;
-const SLAYER_ROLE_ID = process.env.SLAYER_ROLE_ID;
-const HIGH_COMMAND_ROLE_ID = process.env.HIGH_COMMAND_ROLE_ID;
+// Cooldown tracking
+const nameChangeCooldowns = new Map();
+const lastSimilarNameWarning = new Map();
 
-// Data storage
-const userDataPath = path.join(__dirname, 'userData.json');
-let userData = {};
-const cooldowns = new Map();
-const NAME_CHANGE_COOLDOWN = 300000; // 5 minutes
+// Static IPs for Render.com
+const RENDER_STATIC_IPS = [
+    '52.41.36.82',
+    '54.191.253.12',
+    '44.226.122.3'
+];
 
-// Initialize data
-function loadData() {
-  try {
-    if (fs.existsSync(userDataPath)) {
-      userData = JSON.parse(fs.readFileSync(userDataPath));
-    }
-  } catch (error) {
-    console.error('❌ Data load error:', error);
-  }
-}
-
-function saveData() {
-  try {
-    fs.writeFileSync(userDataPath, JSON.stringify(userData, null, 2));
-  } catch (error) {
-    console.error('❌ Data save error:', error);
-  }
-}
-
-// Parse request message
-function parseRequest(content) {
-  const patterns = [
-    /Name\s*[:-\s]\s*(.+?)\s*(?:\n|$)/i,
-    /ID\s*[:-\s]\s*(\d+)\s*(?:\n|$)/i,
-    /Rank\s*[:-\s]\s*(\d+)\s*(?:\n|$)/i
-  ];
-
-  const nameMatch = content.match(patterns[0]);
-  const idMatch = content.match(patterns[1]);
-  const rankMatch = content.match(patterns[2]);
-
-  if (!nameMatch || !idMatch || !rankMatch) return null;
-
-  return {
-    name: nameMatch[1].trim(),
-    id: idMatch[1].trim(),
-    rank: parseInt(rankMatch[1])
-  };
-}
-
-// Validate and format name
-function validateAndFormatName(name, id) {
-  const cleanName = name.replace(/[|\\<>@#&]/g, '').trim();
-  return `${cleanName} | ${id}`;
-}
-
-// Check for duplicates
-function checkDuplicates(userId, newId) {
-  for (const [id, data] of Object.entries(userData)) {
-    if (id === userId) continue;
-    if (data.id === newId) return `❌ ID ${newId} is already in use by ${data.name}`;
-    if (data.name.toLowerCase() === userData[userId].name.toLowerCase()) {
-      return `⚠️ Similar name already exists: ${data.name}`;
-    }
-  }
-  return null;
-}
-
-// Send DM with fallback
-async function safeSendDM(user, message, channel) {
-  try {
-    await user.send(message);
-    return true;
-  } catch (error) {
-    console.error(`❌ DM failed for ${user.tag}:`, error);
-    if (channel) {
-      await channel.send(`${user} ${message}`);
-    }
-    return false;
-  }
-}
-
-// Handle role request
-client.on('messageCreate', async message => {
-  if (message.channel.id !== ROLE_REQUEST_CHANNEL_ID || message.author.bot) return;
-
-  const lastRequest = cooldowns.get(message.author.id);
-  if (lastRequest && Date.now() - lastRequest < NAME_CHANGE_COOLDOWN) {
-    const remaining = Math.ceil((NAME_CHANGE_COOLDOWN - (Date.now() - lastRequest)) / 60000);
-    await message.react('⏳');
-    await safeSendDM(
-      message.author,
-      `⌛ You're on cooldown! Please wait ${remaining} minutes before requesting again.`,
-      message.channel
-    );
-    return;
-  }
-
-  const requestData = parseRequest(message.content);
-  if (!requestData) {
-    await message.react('❌');
-    const example = "**Correct Format:**\nName: Patel Slayers\nID: 123456\nRank: 6";
-    await safeSendDM(
-      message.author,
-      `❌ Invalid format! Please use:\n${example}\n\nWithout correct formatting, you won't receive the role.`,
-      message.channel
-    );
-    return;
-  }
-
-  cooldowns.set(message.author.id, Date.now());
-  const formattedName = validateAndFormatName(requestData.name, requestData.id);
-  
-  // Check duplicates
-  const duplicateError = checkDuplicates(message.author.id, requestData.id);
-  if (duplicateError) {
-    await message.react('⚠️');
-    await safeSendDM(
-      message.author,
-      duplicateError + "\n\nPlease correct your submission.",
-      message.channel
-    );
-    return;
-  }
-
-  try {
-    // Update nickname
-    await message.member.setNickname(formattedName);
-    
-    // Assign role
-    await message.member.roles.add(SLAYER_ROLE_ID);
-    
-    // Update user data
-    userData[message.author.id] = {
-      name: requestData.name,
-      id: requestData.id,
-      rank: requestData.rank,
-      formattedName,
-      timestamp: new Date().toISOString()
-    };
-    saveData();
-
-    // Send confirmation
-    await message.react('✅');
-    const successDM = `✅ Your name has been updated to:\n**${formattedName}**\nSlayer role assigned!`;
-    const dmSent = await safeSendDM(message.author, successDM);
-    
-    // Log to output channel
-    const outputChannel = client.channels.cache.get(OUTPUT_CHANNEL_ID);
-    if (outputChannel) {
-      const logEmbed = new EmbedBuilder()
-        .setTitle('Name Change Processed')
-        .addFields(
-          { name: 'User', value: message.author.toString(), inline: true },
-          { name: 'Old Name', value: message.member.displayName, inline: true },
-          { name: 'New Name', value: formattedName, inline: true },
-          { name: 'DM Status', value: dmSent ? '✅ Sent' : '❌ Failed', inline: true },
-          { name: 'Rank', value: requestData.rank.toString(), inline: true }
-        )
-        .setColor('#00ff00')
-        .setTimestamp();
-      
-      await outputChannel.send({ embeds: [logEmbed] });
-    }
-
-    console.log(`✅ Name changed for ${message.author.tag}: ${formattedName}`);
-  } catch (error) {
-    console.error(`❌ Processing error for ${message.author.tag}:`, error);
-    await message.react('⚠️');
-    await safeSendDM(
-      message.author,
-      "❌ System error! Please contact moderators.",
-      message.channel
-    );
-  }
+client.on('ready', () => {
+    console.log(`✅ ${client.user.tag} is online!`);
+    console.log(`🖥️ Server IPs: ${RENDER_STATIC_IPS.join(', ')}`);
+    console.log(`📊 Bot is monitoring channel ${process.env.ROLE_REQUEST_CHANNEL_ID} for name change requests`);
 });
 
-// Slash command handler
-client.on('interactionCreate', async interaction => {
-  if (!interaction.isCommand()) return;
+// Helper function to validate name format
+function validateNameFormat(content) {
+    const patterns = [
+        /Name\s*[:|-]\s*(.+?)\s*(ID|Id|id)\s*[:|-]\s*(\d+)\s*(Rank|rank)\s*[:|-]\s*(\d+)/i,
+        /Name\s*[:|-]\s*(.+?)\s*(Rank|rank)\s*[:|-]\s*(\d+)\s*(ID|Id|id)\s*[:|-]\s*(\d+)/i,
+        /(.+?)\s*[:|-]\s*(\d+)\s*[:|-]\s*(\d+)/i
+    ];
 
-  // Slayer role removal
-  if (interaction.commandName === 'slayer_role_remove') {
-    if (!interaction.member.roles.cache.has(HIGH_COMMAND_ROLE_ID)) {
-      return interaction.reply({ 
-        content: "❌ You don't have permission for this action.", 
-        ephemeral: true 
-      });
+    for (const pattern of patterns) {
+        const match = content.match(pattern);
+        if (match) {
+            // Extract components based on pattern
+            let name, id, rank;
+            if (match.length === 6) {
+                // First two patterns
+                name = match[1].trim();
+                if (match[2].toLowerCase() === 'id') {
+                    id = match[3];
+                    rank = match[5];
+                } else {
+                    rank = match[3];
+                    id = match[5];
+                }
+            } else {
+                // Third pattern
+                name = match[1].trim();
+                id = match[2];
+                rank = match[3];
+            }
+            return { valid: true, name, id, rank };
+        }
+    }
+    return { valid: false };
+}
+
+// Helper function to format name
+function formatName(name, id) {
+    return `${name} | ${id}`;
+}
+
+// Check for duplicate IDs
+async function checkDuplicateId(guild, id, userId) {
+    const members = await guild.members.fetch();
+    for (const member of members.values()) {
+        if (member.id === userId) continue;
+        if (member.nickname && member.nickname.includes(`| ${id}`)) {
+            return member;
+        }
+    }
+    return null;
+}
+
+// Check for similar names
+async function checkSimilarNames(guild, newName, userId) {
+    const members = await guild.members.fetch();
+    const similarMembers = [];
+    
+    for (const member of members.values()) {
+        if (member.id === userId) continue;
+        const currentName = member.nickname || member.user.username;
+        if (currentName.split('|')[0].trim().toLowerCase() === newName.toLowerCase()) {
+            similarMembers.push(member);
+        }
+    }
+    
+    return similarMembers;
+}
+
+// Process name change request
+async function processNameChange(message) {
+    // Check cooldown
+    if (nameChangeCooldowns.has(message.author.id)) {
+        const remaining = nameChangeCooldowns.get(message.author.id) - Date.now();
+        if (remaining > 0) {
+            await message.react('⏳');
+            await message.author.send(`You're on cooldown. Please wait ${Math.ceil(remaining / 60000)} minutes before requesting another name change.`);
+            return;
+        }
     }
 
-    const user = interaction.options.getUser('user');
-    const member = interaction.guild.members.cache.get(user.id);
+    const validation = validateNameFormat(message.content);
+    if (!validation.valid) {
+        await message.react('❌');
+        const example = "**Correct Format Example:**\n```Name: Patel Slayers\nID: 123456\nRank: 6```\nPlease use this format exactly to get your role.";
+        await message.author.send(`Your name change request doesn't follow the required format.\n${example}`);
+        return;
+    }
 
-    if (!member.roles.cache.has(SLAYER_ROLE_ID)) {
-      return interaction.reply({
-        content: "⚠️ User doesn't have the Slayer role.",
-        ephemeral: true
-      });
+    const { name, id, rank } = validation;
+    const guild = message.guild;
+    const member = message.member;
+
+    // Check duplicate ID
+    const duplicateMember = await checkDuplicateId(guild, id, member.id);
+    if (duplicateMember) {
+        await message.react('❌');
+        await message.author.send(`The ID ${id} is already in use by ${duplicateMember.toString()}. Please use a unique ID.`);
+        return;
+    }
+
+    // Check similar names
+    const similarMembers = await checkSimilarNames(guild, name, member.id);
+    if (similarMembers.length > 0) {
+        const now = Date.now();
+        const lastWarning = lastSimilarNameWarning.get(message.author.id) || 0;
+        
+        if (now - lastWarning > 86400000) { // 24 hours
+            const warningMessage = `Warning: The name "${name}" is very similar to existing members:\n${similarMembers.map(m => m.toString()).join('\n')}\n\nPlease consider using a more distinct name to avoid confusion.`;
+            await message.author.send(warningMessage);
+            lastSimilarNameWarning.set(message.author.id, now);
+        }
+    }
+
+    // Format new nickname
+    const newNickname = formatName(name, id);
+
+    try {
+        // Set nickname
+        await member.setNickname(newNickname);
+        
+        // Add Slayer role if not present
+        if (!member.roles.cache.has(process.env.SLAYER_ROLE_ID)) {
+            await member.roles.add(process.env.SLAYER_ROLE_ID);
+        }
+
+        // Send success DM
+        try {
+            const dmEmbed = new EmbedBuilder()
+                .setColor('#00FF00')
+                .setTitle('Name Change Successful')
+                .setDescription(`Your nickname has been updated to:\n**${newNickname}**`)
+                .addFields(
+                    { name: 'Previous Name', value: member.user.username, inline: true },
+                    { name: 'New Name', value: newNickname, inline: true }
+                )
+                .setTimestamp();
+            
+            await message.author.send({ embeds: [dmEmbed] });
+            
+            // Log to output channel
+            const outputChannel = client.channels.cache.get(process.env.NAME_CHANGE_OUTPUT_CHANNEL_ID);
+            if (outputChannel) {
+                const logEmbed = new EmbedBuilder()
+                    .setColor('#00FF00')
+                    .setTitle('Name Change Processed')
+                    .setDescription(`${member.toString()} has updated their name`)
+                    .addFields(
+                        { name: 'New Name', value: newNickname, inline: true },
+                        { name: 'Rank', value: rank, inline: true },
+                        { name: 'DM Status', value: '✅ Success', inline: true }
+                    )
+                    .setTimestamp();
+                
+                await outputChannel.send({ embeds: [logEmbed] });
+            }
+        } catch (dmError) {
+            console.error('Failed to send DM:', dmError);
+            
+            // Fallback to channel message if DM fails
+            const outputChannel = client.channels.cache.get(process.env.NAME_CHANGE_OUTPUT_CHANNEL_ID);
+            if (outputChannel) {
+                const fallbackEmbed = new EmbedBuilder()
+                    .setColor('#FFA500')
+                    .setTitle('Name Change Processed (DM Failed)')
+                    .setDescription(`${member.toString()}, your name has been updated to **${newNickname}** but I couldn't DM you.`)
+                    .setTimestamp();
+                
+                await outputChannel.send({ embeds: [fallbackEmbed] });
+            }
+        }
+
+        // Set cooldown
+        nameChangeCooldowns.set(message.author.id, Date.now() + parseInt(process.env.NAME_CHANGE_COOLDOWN));
+        await message.react('✅');
+        
+        console.log(`Name changed for ${message.author.tag}: ${newNickname}`);
+    } catch (error) {
+        console.error('Error processing name change:', error);
+        await message.react('❌');
+        await message.author.send('An error occurred while processing your name change. Please try again later or contact an admin.');
+    }
+}
+
+// Slayer role removal command
+async function removeSlayerRole(interaction) {
+    if (!interaction.member.roles.cache.has(process.env.HIGH_COMMAND_ROLE_ID)) {
+        await interaction.reply({ content: '❌ You do not have permission to use this command.', ephemeral: true });
+        return;
+    }
+
+    const targetMember = interaction.options.getMember('member');
+    if (!targetMember) {
+        await interaction.reply({ content: '❌ Member not found.', ephemeral: true });
+        return;
+    }
+
+    if (!targetMember.roles.cache.has(process.env.SLAYER_ROLE_ID)) {
+        await interaction.reply({ content: '❌ This member does not have the Slayer role.', ephemeral: true });
+        return;
     }
 
     try {
-      await member.roles.remove(SLAYER_ROLE_ID);
-      delete userData[user.id];
-      saveData();
-
-      const dmMessage = member.roles.cache.size > 1
-        ? "🔰 Your Slayer role was removed, but you're still part of our family! Contact High Command if this was a mistake."
-        : "😢 You're no longer in the Slayers family. We hope to see you again someday!";
-      
-      await safeSendDM(user, dmMessage);
-      await interaction.reply({
-        content: `✅ Removed Slayer role from ${user.tag}`,
-        ephemeral: true
-      });
-      console.log(`➖ Slayer role removed from ${user.tag}`);
-    } catch (error) {
-      console.error('❌ Role removal error:', error);
-      await interaction.reply({
-        content: "❌ Failed to remove role. Check permissions.",
-        ephemeral: true
-      });
-    }
-  }
-
-  // Name list command
-  if (interaction.commandName === 'name_list') {
-    const slayers = Object.entries(userData)
-      .map(([id, data]) => `• ${data.formattedName} (Rank ${data.rank})`)
-      .join('\n') || 'No Slayers found';
-
-    const embed = new EmbedBuilder()
-      .setTitle('Current Slayers')
-      .setDescription(slayers)
-      .setColor('#0099ff');
-    
-    await interaction.reply({ embeds: [embed], ephemeral: true });
-  }
-
-  // Name change DM commands
-  if (interaction.commandName === 'dm_name_change') {
-    if (!interaction.member.roles.cache.has(HIGH_COMMAND_ROLE_ID)) {
-      return interaction.reply({ 
-        content: "❌ High Command permission required", 
-        ephemeral: true 
-      });
-    }
-
-    const subCommand = interaction.options.getSubcommand();
-    const message = "📢 **Name Format Reminder**\n" +
-      "Ensure your name follows:\n" +
-      "```Name: Your Name\nID: 123456\nRank: 3```\n" +
-      "Incorrect formatting = no role!";
-
-    if (subCommand === 'all') {
-      await interaction.deferReply({ ephemeral: true });
-      let success = 0, failed = 0;
-
-      for (const userId in userData) {
+        // Remove Slayer role
+        await targetMember.roles.remove(process.env.SLAYER_ROLE_ID);
+        
+        // Send DM to member
         try {
-          const user = await client.users.fetch(userId);
-          if (await safeSendDM(user, message)) success++;
-          else failed++;
-        } catch (error) {
-          failed++;
-          console.error(`❌ DM error for ${userId}:`, error);
+            const dmEmbed = new EmbedBuilder()
+                .setColor('#FF0000')
+                .setTitle('Slayer Role Removed')
+                .setDescription('You are no longer part of the Slayer family.')
+                .addFields(
+                    { name: 'Reason', value: 'Role removed by High Command', inline: true }
+                )
+                .setTimestamp();
+            
+            await targetMember.send({ embeds: [dmEmbed] });
+            
+            // Log to output channel
+            const outputChannel = client.channels.cache.get(process.env.NAME_CHANGE_OUTPUT_CHANNEL_ID);
+            if (outputChannel) {
+                const logEmbed = new EmbedBuilder()
+                    .setColor('#FF0000')
+                    .setTitle('Slayer Role Removed')
+                    .setDescription(`${targetMember.toString()} has been removed from the Slayer family`)
+                    .addFields(
+                        { name: 'Action by', value: interaction.user.toString(), inline: true },
+                        { name: 'DM Status', value: '✅ Success', inline: true }
+                    )
+                    .setTimestamp();
+                
+                await outputChannel.send({ embeds: [logEmbed] });
+            }
+        } catch (dmError) {
+            console.error('Failed to send DM:', dmError);
+            
+            // Fallback to channel message if DM fails
+            const outputChannel = client.channels.cache.get(process.env.NAME_CHANGE_OUTPUT_CHANNEL_ID);
+            if (outputChannel) {
+                const fallbackEmbed = new EmbedBuilder()
+                    .setColor('#FFA500')
+                    .setTitle('Slayer Role Removed (DM Failed)')
+                    .setDescription(`${targetMember.toString()}, your Slayer role has been removed but I couldn't DM you.`)
+                    .setTimestamp();
+                
+                await outputChannel.send({ embeds: [fallbackEmbed] });
+            }
         }
-      }
 
-      await interaction.editReply(
-        `✅ Sent name reminders:\n• Success: ${success}\n• Failed: ${failed}`
-      );
-    } 
-    else if (subCommand === 'user') {
-      const user = interaction.options.getUser('target');
-      const dmSent = await safeSendDM(user, message);
-      
-      await interaction.reply({
-        content: dmSent 
-          ? `✅ Reminder sent to ${user.tag}` 
-          : `⚠️ Failed to DM ${user.tag}. Sent in channel instead.`,
-        ephemeral: true
-      });
+        await interaction.reply({ content: `✅ Successfully removed Slayer role from ${targetMember.toString()}`, ephemeral: true });
+        console.log(`Slayer role removed from ${targetMember.user.tag} by ${interaction.user.tag}`);
+    } catch (error) {
+        console.error('Error removing Slayer role:', error);
+        await interaction.reply({ content: '❌ An error occurred while removing the role.', ephemeral: true });
     }
-  }
+}
 
-  // CSV Export
-  if (interaction.commandName === 'export_slayers') {
-    if (!interaction.member.roles.cache.has(HIGH_COMMAND_ROLE_ID)) {
-      return interaction.reply({ 
-        content: "❌ High Command permission required", 
-        ephemeral: true 
-      });
+// Name list command
+async function listSlayerNames(interaction) {
+    try {
+        const guild = interation.guild;
+        const members = await guild.members.fetch();
+        const slayerMembers = members.filter(m => m.roles.cache.has(process.env.SLAYER_ROLE_ID));
+        
+        if (slayerMembers.size === 0) {
+            await interaction.reply('No members with the Slayer role found.');
+            return;
+        }
+        
+        const nameList = slayerMembers.map(m => {
+            const name = m.nickname || m.user.username;
+            return `• ${name} (${m.user.tag})`;
+        }).join('\n');
+        
+        const embed = new EmbedBuilder()
+            .setTitle('Slayer Members List')
+            .setDescription(nameList)
+            .setColor('#0099FF')
+            .setFooter({ text: `Total: ${slayerMembers.size} members` });
+            
+        await interaction.reply({ embeds: [embed] });
+        console.log(`Slayer name list generated by ${interaction.user.tag}`);
+    } catch (error) {
+        console.error('Error generating name list:', error);
+        await interaction.reply('An error occurred while generating the name list.');
+    }
+}
+
+// DM all command
+async function dmAllNameChangeNotice(interaction) {
+    if (!interaction.member.roles.cache.has(process.env.HIGH_COMMAND_ROLE_ID)) {
+        await interaction.reply({ content: '❌ You do not have permission to use this command.', ephemeral: true });
+        return;
     }
 
-    let csv = 'User ID,Name,Formatted Name,ID,Rank,Timestamp\n';
-    for (const [userId, data] of Object.entries(userData)) {
-      csv += `"${userId}","${data.name}","${data.formattedName}",${data.id},${data.rank},${data.timestamp}\n`;
+    const message = interaction.options.getString('message');
+    const guild = interaction.guild;
+    
+    try {
+        await interaction.reply({ content: '⏳ Sending DMs to all Slayers...', ephemeral: true });
+        
+        const members = await guild.members.fetch();
+        const slayerMembers = members.filter(m => m.roles.cache.has(process.env.SLAYER_ROLE_ID));
+        
+        let successCount = 0;
+        let failCount = 0;
+        const failedMembers = [];
+        
+        for (const member of slayerMembers.values()) {
+            try {
+                await member.send(`📢 Message from High Command:\n${message}`);
+                successCount++;
+            } catch (error) {
+                failCount++;
+                failedMembers.push(member.toString());
+                console.error(`Failed to DM ${member.user.tag}:`, error);
+            }
+        }
+        
+        const resultEmbed = new EmbedBuilder()
+            .setTitle('DM Campaign Results')
+            .setDescription(`Sent message to Slayers about name changes`)
+            .addFields(
+                { name: 'Total Slayers', value: slayerMembers.size.toString(), inline: true },
+                { name: 'Successful DMs', value: successCount.toString(), inline: true },
+                { name: 'Failed DMs', value: failCount.toString(), inline: true }
+            )
+            .setColor(failCount > 0 ? '#FFA500' : '#00FF00')
+            .setTimestamp();
+            
+        if (failedMembers.length > 0) {
+            resultEmbed.addFields({
+                name: 'Failed to Reach',
+                value: failedMembers.join('\n').slice(0, 1024)
+            });
+        }
+        
+        await interaction.followUp({ embeds: [resultEmbed], ephemeral: true });
+        console.log(`DM campaign completed by ${interaction.user.tag}: ${successCount} success, ${failCount} fails`);
+    } catch (error) {
+        console.error('Error in DM all command:', error);
+        await interaction.followUp({ content: '❌ An error occurred during the DM campaign.', ephemeral: true });
+    }
+}
+
+// Generate CSV report
+async function generateCSVReport(interaction) {
+    if (!interaction.member.roles.cache.has(process.env.HIGH_COMMAND_ROLE_ID)) {
+        await interaction.reply({ content: '❌ You do not have permission to use this command.', ephemeral: true });
+        return;
     }
 
-    const buffer = Buffer.from(csv, 'utf-8');
-    const attachment = new AttachmentBuilder(buffer, { name: 'slayers_export.csv' });
+    try {
+        await interaction.deferReply({ ephemeral: true });
+        
+        const guild = interaction.guild;
+        const members = await guild.members.fetch();
+        const slayerMembers = members.filter(m => m.roles.cache.has(process.env.SLAYER_ROLE_ID));
+        
+        const csvData = [];
+        for (const member of slayerMembers.values()) {
+            const name = member.nickname || member.user.username;
+            const [slayerName, id] = name.split('|').map(s => s.trim());
+            
+            csvData.push({
+                username: member.user.username,
+                discriminator: member.user.discriminator,
+                userId: member.id,
+                slayerName: slayerName || 'N/A',
+                id: id || 'N/A',
+                joinedAt: member.joinedAt.toISOString(),
+                lastMessage: member.lastMessage ? member.lastMessage.createdAt.toISOString() : 'N/A'
+            });
+        }
+        
+        const csvWriter = createObjectCsvWriter({
+            path: 'slayers_report.csv',
+            header: [
+                { id: 'username', title: 'USERNAME' },
+                { id: 'discriminator', title: 'DISCRIMINATOR' },
+                { id: 'userId', title: 'USER_ID' },
+                { id: 'slayerName', title: 'SLAYER_NAME' },
+                { id: 'id', title: 'ID' },
+                { id: 'joinedAt', title: 'JOINED_AT' },
+                { id: 'lastMessage', title: 'LAST_MESSAGE' }
+            ]
+        });
+        
+        await csvWriter.writeRecords(csvData);
+        
+        const attachment = new AttachmentBuilder('slayers_report.csv');
+        await interaction.followUp({ 
+            content: 'Here is the CSV report of all Slayers:',
+            files: [attachment],
+            ephemeral: true
+        });
+        
+        console.log(`CSV report generated by ${interaction.user.tag}`);
+    } catch (error) {
+        console.error('Error generating CSV report:', error);
+        await interaction.followUp({ content: '❌ An error occurred while generating the report.', ephemeral: true });
+    }
+}
 
-    await interaction.reply({
-      content: '📊 Slayers Data Export:',
-      files: [attachment],
-      ephemeral: true
-    });
-  }
+// Event listeners
+client.on('messageCreate', async (message) => {
+    if (message.author.bot) return;
+    if (message.channel.id !== process.env.ROLE_REQUEST_CHANNEL_ID) return;
+    
+    try {
+        await processNameChange(message);
+    } catch (error) {
+        console.error('Error in messageCreate event:', error);
+    }
 });
 
-// Initialize
-client.once('ready', () => {
-  console.log(`🚀 Bot launched as ${client.user.tag}`);
-  loadData();
-  
-  // Rebuild userData from server members
-  const guild = client.guilds.cache.first();
-  guild.members.fetch().then(members => {
-    members.forEach(member => {
-      if (member.roles.cache.has(SLAYER_ROLE_ID) && member.nickname && /(.+)\s\|\s(\d+)/.test(member.nickname)) {
-        const [, name, id] = member.nickname.match(/(.+)\s\|\s(\d+)/);
-        userData[member.id] = {
-          name,
-          id,
-          formattedName: member.nickname,
-          rank: 0, // Unknown from nickname
-          timestamp: new Date().toISOString()
-        };
-      }
-    });
-    saveData();
-    console.log(`🔍 Loaded ${Object.keys(userData).length} Slayers from server`);
-  });
-  
-  // Register commands
-  const commands = [
-    {
-      name: 'slayer_role_remove',
-      description: 'Remove Slayer role from a user',
-      options: [{
-        name: 'user',
-        type: 6,
-        description: 'User to remove role from',
-        required: true
-      }]
-    },
-    {
-      name: 'name_list',
-      description: 'List all Slayers with formatted names'
-    },
-    {
-      name: 'dm_name_change',
-      description: 'Send name format reminders',
-      options: [
-        {
-          name: 'all',
-          type: 1,
-          description: 'DM all Slayers'
-        },
-        {
-          name: 'user',
-          type: 1,
-          description: 'DM specific user',
-          options: [{
-            name: 'target',
-            type: 6,
-            description: 'User to remind',
-            required: true
-          }]
-        }
-      ]
-    },
-    {
-      name: 'export_slayers',
-      description: 'Export Slayer data to CSV'
-    }
-  ];
+// Slash commands
+client.on('interactionCreate', async (interaction) => {
+    if (!interaction.isCommand()) return;
 
-  client.application.commands.set(commands)
-    .then(() => console.log('✅ Slash commands registered'))
-    .catch(console.error);
+    try {
+        switch (interaction.commandName) {
+            case 'slayer_role_remove':
+                await removeSlayerRole(interaction);
+                break;
+            case 'name_list':
+                await listSlayerNames(interaction);
+                break;
+            case 'dm_name_change_notice':
+                await dmAllNameChangeNotice(interaction);
+                break;
+            case 'dm_individual':
+                // Similar to dmAllNameChangeNotice but for individual members
+                break;
+            case 'generate_slayer_report':
+                await generateCSVReport(interaction);
+                break;
+            default:
+                await interaction.reply('Unknown command.');
+        }
+    } catch (error) {
+        console.error('Error handling interaction:', error);
+        if (!interaction.replied) {
+            await interaction.reply({ content: '❌ An error occurred while processing your command.', ephemeral: true });
+        }
+    }
 });
 
-client.login(TOKEN);
+// Error handling
+process.on('unhandledRejection', error => {
+    console.error('Unhandled promise rejection:', error);
+});
+
+process.on('uncaughtException', error => {
+    console.error('Uncaught exception:', error);
+});
+
+client.login(process.env.TOKEN);
