@@ -1,315 +1,329 @@
 require('dotenv').config();
-const { Client, IntentsBitField, EmbedBuilder, AttachmentBuilder, SlashCommandBuilder } = require('discord.js');
+const { Client, IntentsBitField, EmbedBuilder, SlashCommandBuilder, AttachmentBuilder } = require('discord.js');
 const { createObjectCsvWriter } = require('csv-writer');
 const fs = require('fs');
 const http = require('http');
 
-// =====================================
-// HTTP Server for Render.com
-// =====================================
+// ======================
+// 1. SERVER SETUP (Render.com)
+// ======================
 const server = http.createServer((req, res) => {
   res.writeHead(200, {'Content-Type': 'text/plain'});
-  res.end('Discord Name Manager Bot is running\n');
+  res.end('Slayer Bot Status: OPERATIONAL\n');
 }).listen(process.env.PORT || 3000, () => {
-  console.log(`🖥️ HTTP server running on port ${process.env.PORT || 3000}`);
+  console.log(`[SERVER] HTTP server running on port ${process.env.PORT || 3000}`);
 });
 
-// =====================================
-// Discord Client Setup
-// =====================================
+// ======================
+// 2. DISCORD CLIENT SETUP
+// ======================
 const client = new Client({
   intents: [
     IntentsBitField.Flags.Guilds,
     IntentsBitField.Flags.GuildMembers,
     IntentsBitField.Flags.GuildPresences,
     IntentsBitField.Flags.GuildMessages,
-    IntentsBitField.Flags.MessageContent,
-    IntentsBitField.Flags.DirectMessages
+    IntentsBitField.Flags.MessageContent
   ],
   presence: {
     status: 'online',
-    activities: [{
-      name: 'Name Management',
-      type: 3 // WATCHING
-    }]
+    activities: [{ name: 'Slayer Management', type: 3 }] // WATCHING
   }
 });
 
-// Constants
-const nameChangeCooldowns = new Map();
-const ID_REGEX = /(?:\bID\s*[:|-]\s*)(\d+)/i;
-const NAME_REGEX = /(?:\bName\s*[:|-]\s*)([^\n\r]+)/i;
-const RANK_REGEX = /(?:\bRank\s*[:|-]\s*)(\d+)/i;
+// ======================
+// 3. TRACKING SYSTEMS
+// ======================
+const cooldowns = new Map();
+const statusHistory = new Map(); // Tracks user status history
+const slayerRegistry = new Map(); // Tracks all Slayers
 
-// =====================================
-// Presence Tracking System
-// =====================================
+// ======================
+// 4. PRESENCE TRACKING WITH DETAILED LOGGING
+// ======================
 client.on('presenceUpdate', (oldPresence, newPresence) => {
-  const user = newPresence?.user || oldPresence?.user;
-  if (!user || user.bot) return;
+  const member = newPresence?.member || oldPresence?.member;
+  if (!member || member.user.bot) return;
 
   const oldStatus = oldPresence?.status || 'offline';
   const newStatus = newPresence?.status || 'offline';
-  
-  if (oldStatus !== newStatus) {
-    const timestamp = new Date().toLocaleString();
-    console.log(`🔄 [${timestamp}] ${user.tag} status changed: ${oldStatus.toUpperCase()} → ${newStatus.toUpperCase()}`);
-    
-    // Send to admin channel if configured
-    const logChannel = client.channels.cache.get(process.env.ADMIN_LOG_CHANNEL_ID);
-    if (logChannel) {
-      const statusColors = {
-        online: '#43B581',
-        idle: '#FAA61A',
-        dnd: '#F04747',
-        offline: '#747F8D'
-      };
 
-      logChannel.send({
-        embeds: [new EmbedBuilder()
-          .setColor(statusColors[newStatus] || '#000000')
-          .setTitle('Member Status Changed')
-          .setDescription(`${user.toString()} is now **${newStatus.toUpperCase()}**`)
-          .setThumbnail(user.displayAvatarURL())
-          .setTimestamp()
-        ]
-      });
+  if (oldStatus !== newStatus) {
+    const timestamp = new Date();
+    const isSlayer = member.roles.cache.has(process.env.SLAYER_ROLE);
+
+    // Update status history
+    if (!statusHistory.has(member.id)) {
+      statusHistory.set(member.id, []);
+    }
+    statusHistory.get(member.id).push({
+      status: newStatus,
+      timestamp
+    });
+
+    // Console logging with emoji indicators
+    const statusEmojis = {
+      online: '🟢',
+      idle: '🟡',
+      dnd: '🔴',
+      offline: '⚫'
+    };
+
+    console.log(`[${timestamp.toLocaleTimeString()}] ${statusEmojis[newStatus] || '⚪'} ${member.user.tag} (${isSlayer ? 'SLAYER' : 'member'}) ${oldStatus.toUpperCase()} → ${newStatus.toUpperCase()}`);
+
+    // Additional logging for Slayers
+    if (isSlayer) {
+      const statusChannel = client.channels.cache.get(process.env.STATUS_LOG_CHANNEL);
+      if (statusChannel) {
+        const embed = new EmbedBuilder()
+          .setColor(getStatusColor(newStatus))
+          .setTitle('Slayer Status Change')
+          .setDescription(`${member.toString()} status updated`)
+          .addFields(
+            { name: 'Previous', value: oldStatus.toUpperCase(), inline: true },
+            { name: 'Current', value: newStatus.toUpperCase(), inline: true },
+            { name: 'Duration', value: getDurationText(member.id, newStatus), inline: true }
+          )
+          .setThumbnail(member.user.displayAvatarURL())
+          .setTimestamp();
+
+        statusChannel.send({ embeds: [embed] });
+      }
     }
   }
 });
 
-// =====================================
-// Name Management System
-// =====================================
-function validateNameFormat(content) {
-  const nameMatch = content.match(NAME_REGEX);
-  const idMatch = content.match(ID_REGEX);
-  const rankMatch = content.match(RANK_REGEX);
+function getDurationText(userId, newStatus) {
+  const history = statusHistory.get(userId);
+  if (!history || history.length < 2) return 'First status';
 
-  if (!nameMatch || !idMatch || !rankMatch) {
-    return { valid: false };
-  }
-
-  return {
-    valid: true,
-    name: nameMatch[1].trim(),
-    id: idMatch[1].trim(),
-    rank: rankMatch[1].trim()
-  };
+  const prevEntry = history[history.length - 2];
+  const duration = (new Date() - prevEntry.timestamp) / 1000;
+  
+  if (duration < 60) return `${Math.floor(duration)} sec`;
+  if (duration < 3600) return `${Math.floor(duration/60)} min`;
+  return `${Math.floor(duration/3600)} hours`;
 }
 
-async function checkDuplicateId(guild, id, userId) {
-  const members = await guild.members.fetch();
-  for (const member of members.values()) {
-    if (member.id === userId) continue;
-    if (member.nickname && member.nickname.includes(`| ${id}`)) {
-      return member;
-    }
-  }
-  return null;
-}
-
+// ======================
+// 5. ROLE REQUEST SYSTEM
+// ======================
 client.on('messageCreate', async (message) => {
-  if (message.author.bot || message.channel.id !== process.env.ROLE_REQUEST_CHANNEL_ID) return;
+  if (message.author.bot || message.channel.id !== process.env.ROLE_REQUEST_CHANNEL) return;
+
+  // Parse message: "Name: [name] ID: [id] Rank: [rank]"
+  const parseError = async () => {
+    await message.react('❌');
+    await message.author.send({
+      embeds: [new EmbedBuilder()
+        .setColor('#FF0000')
+        .setTitle('Invalid Format')
+        .setDescription('Use:\n```Name: YourName\nID: 123456\nRank: 5```')
+      ]
+    });
+  };
+
+  const lines = message.content.split('\n').map(l => l.trim());
+  const nameLine = lines.find(l => l.toLowerCase().startsWith('name:'));
+  const idLine = lines.find(l => l.toLowerCase().startsWith('id:'));
+  const rankLine = lines.find(l => l.toLowerCase().startsWith('rank:'));
+
+  if (!nameLine || !idLine || !rankLine) return parseError();
+
+  const extractValue = (line) => line.split(':')[1]?.trim();
+  const name = extractValue(nameLine);
+  const id = extractValue(idLine);
+  const rank = extractValue(rankLine);
+
+  if (!name || !id || !rank) return parseError();
 
   // Cooldown check
-  if (nameChangeCooldowns.has(message.author.id)) {
-    const remaining = nameChangeCooldowns.get(message.author.id) - Date.now();
+  if (cooldowns.has(message.author.id)) {
+    const remaining = cooldowns.get(message.author.id) - Date.now();
     if (remaining > 0) {
       await message.react('⏳');
-      await message.author.send(`⌛ Please wait ${Math.ceil(remaining/60000)} minutes before another request.`);
-      return;
+      return message.author.send(`⏳ Please wait ${Math.ceil(remaining/60000)} minutes before another request.`);
     }
   }
-
-  const validation = validateNameFormat(message.content);
-  if (!validation.valid) {
-    await message.react('❌');
-    const example = "**Correct Format Example:**\n```Name: Patel Slayers\nID: 123456\nRank: 6```\nPlease use this format exactly to get your role.";
-    await message.author.send(`Your name change request doesn't follow the required format.\n${example}`);
-    return;
-  }
-
-  const { name, id, rank } = validation;
-  const newNickname = `${name} | ${id}`;
 
   try {
-    await message.member.setNickname(newNickname);
-    await message.member.roles.add(process.env.SLAYER_ROLE_ID);
+    // Format nickname and assign role
+    const nickname = `${name} | ${id}`;
+    await message.member.setNickname(nickname);
+    await message.member.roles.add(process.env.SLAYER_ROLE);
 
-    // Send confirmation DM
-    try {
-      const dmEmbed = new EmbedBuilder()
-        .setColor('#00FF00')
-        .setTitle('✅ Name Change Successful')
-        .setDescription(`Your nickname has been updated to:\n**${newNickname}**`)
+    // Register Slayer
+    slayerRegistry.set(message.author.id, {
+      name,
+      id,
+      rank,
+      joinDate: new Date(),
+      status: message.member.presence?.status || 'offline'
+    });
+
+    // Send confirmation
+    const confirmEmbed = new EmbedBuilder()
+      .setColor('#00FF00')
+      .setTitle('✅ Slayer Registration Complete')
+      .setDescription(`**${nickname}**`)
+      .addFields(
+        { name: 'Rank', value: rank, inline: true },
+        { name: 'Current Status', value: message.member.presence?.status?.toUpperCase() || 'OFFLINE', inline: true }
+      )
+      .setThumbnail(message.author.displayAvatarURL())
+      .setTimestamp();
+
+    await message.react('✅');
+    await message.author.send({ embeds: [confirmEmbed] });
+
+    // Log to Slayer channel
+    const logChannel = client.channels.cache.get(process.env.SLAYER_LOG_CHANNEL);
+    if (logChannel) {
+      const logEmbed = new EmbedBuilder()
+        .setColor('#0099FF')
+        .setTitle('New Slayer Initiated')
+        .setDescription(`${message.author.toString()} joined the ranks`)
         .addFields(
-          { name: 'Rank', value: rank, inline: true },
-          { name: 'ID', value: id, inline: true }
+          { name: 'Nickname', value: nickname },
+          { name: 'Rank', value: rank },
+          { name: 'Status', value: message.member.presence?.status?.toUpperCase() || 'OFFLINE' }
         )
+        .setThumbnail(message.author.displayAvatarURL())
         .setTimestamp();
-      
-      await message.author.send({ embeds: [dmEmbed] });
-      await message.react('✅');
-      
-      // Log to output channel
-      const outputChannel = client.channels.cache.get(process.env.NAME_CHANGE_OUTPUT_CHANNEL_ID);
-      if (outputChannel) {
-        const logEmbed = new EmbedBuilder()
-          .setColor('#00FF00')
-          .setTitle('Name Change Processed')
-          .setDescription(`${message.author.toString()} updated their name`)
-          .addFields(
-            { name: 'New Name', value: newNickname },
-            { name: 'DM Status', value: '✅ Delivered' }
-          )
-          .setTimestamp();
-        
-        await outputChannel.send({ embeds: [logEmbed] });
-      }
-    } catch (dmError) {
-      console.error('Failed to send DM:', dmError);
-      const outputChannel = client.channels.cache.get(process.env.NAME_CHANGE_OUTPUT_CHANNEL_ID);
-      if (outputChannel) {
-        await outputChannel.send({
-          embeds: [new EmbedBuilder()
-            .setColor('#FFA500')
-            .setTitle('Name Change Processed (DM Failed)')
-            .setDescription(`${message.author.toString()}'s name was updated but DM failed`)
-            .addFields(
-              { name: 'New Name', value: newNickname }
-            )
-            .setTimestamp()
-          ]
-        });
-      }
+
+      await logChannel.send({ embeds: [logEmbed] });
     }
 
-    nameChangeCooldowns.set(message.author.id, Date.now() + parseInt(process.env.NAME_CHANGE_COOLDOWN));
+    // Set cooldown
+    cooldowns.set(message.author.id, Date.now() + parseInt(process.env.COOLDOWN));
+    console.log(`[REGISTER] New Slayer: ${message.author.tag} as "${nickname}" (Rank ${rank})`);
+
   } catch (error) {
-    console.error('Error processing name change:', error);
+    console.error(`[REGISTER ERROR] ${message.author.tag}:`, error);
     await message.react('⚠️');
-    await message.author.send('❌ An error occurred while processing your name change. Please try again later.');
+    await message.author.send('❌ Registration failed. Please contact High Command.');
   }
 });
 
-// =====================================
-// Slash Commands
-// =====================================
+// ======================
+// 6. SLASH COMMANDS
+// ======================
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isCommand()) return;
 
   try {
     switch (interaction.commandName) {
-      case 'slayer_list':
+      case 'slayerlist':
         await handleSlayerList(interaction);
         break;
-      case 'export_slayers':
-        await handleExportCommand(interaction);
-        break;
-      case 'remove_slayer':
+      case 'removeslayer':
         await handleRemoveSlayer(interaction);
+        break;
+      case 'slayerstats':
+        await handleSlayerStats(interaction);
+        break;
+      case 'checkstatus':
+        await handleCheckStatus(interaction);
         break;
       default:
         await interaction.reply({ content: '❌ Unknown command', ephemeral: true });
     }
   } catch (error) {
-    console.error('Command error:', error);
-    await interaction.reply({ content: '❌ An error occurred while processing your command.', ephemeral: true });
+    console.error(`[COMMAND ERROR] ${interaction.commandName}:`, error);
+    await interaction.reply({ content: '⚠️ Command failed', ephemeral: true });
   }
 });
 
+// Command: /slayerlist
 async function handleSlayerList(interaction) {
-  const members = await interaction.guild.members.fetch();
-  const slayers = members.filter(m => m.roles.cache.has(process.env.SLAYER_ROLE_ID));
-  
+  const slayers = (await interaction.guild.members.fetch())
+    .filter(m => m.roles.cache.has(process.env.SLAYER_ROLE))
+    .sort((a, b) => (a.nickname || a.user.username).localeCompare(b.nickname || b.user.username));
+
+  if (slayers.size === 0) {
+    return interaction.reply({ content: 'No Slayers found', ephemeral: true });
+  }
+
   const embed = new EmbedBuilder()
-    .setTitle('🏆 Slayer Members')
-    .setDescription(slayers.map(m => `• ${m.nickname || m.user.username} (${m.presence?.status || 'offline'})`).join('\n'))
-    .setFooter({ text: `Total: ${slayers.size} members` })
-    .setColor('#0099FF');
-    
-  await interaction.reply({ embeds: [embed] });
-}
+    .setTitle('🏆 Slayer Roster')
+    .setColor('#FFD700')
+    .setDescription(`Total Slayers: ${slayers.size}`);
 
-async function handleExportCommand(interaction) {
-  if (!interaction.member.roles.cache.has(process.env.HIGH_COMMAND_ROLE_ID)) {
-    return interaction.reply({ content: '❌ You do not have permission to use this command.', ephemeral: true });
+  // Split into fields of 10
+  const slayerArray = Array.from(slayers.values());
+  for (let i = 0; i < slayerArray.length; i += 10) {
+    const batch = slayerArray.slice(i, i + 10);
+    embed.addFields({
+      name: `Batch ${Math.floor(i/10) + 1}`,
+      value: batch.map(m => {
+        const status = m.presence?.status || 'offline';
+        const statusEmoji = {
+          online: '🟢',
+          idle: '🟡',
+          dnd: '🔴',
+          offline: '⚫'
+        }[status];
+        return `${statusEmoji || '⚪'} ${m.nickname || m.user.username}`;
+      }).join('\n'),
+      inline: true
+    });
   }
 
-  await interaction.deferReply({ ephemeral: true });
-
-  const csvPath = './slayers_export.csv';
-  const members = await interaction.guild.members.fetch();
-  const slayers = members.filter(m => m.roles.cache.has(process.env.SLAYER_ROLE_ID));
-
-  const csvWriter = createObjectCsvWriter({
-    path: csvPath,
-    header: [
-      { id: 'name', title: 'NAME' },
-      { id: 'id', title: 'ID' },
-      { id: 'status', title: 'STATUS' },
-      { id: 'joinedAt', title: 'JOIN_DATE' }
-    ]
-  });
-
-  const records = slayers.map(member => ({
-    name: member.nickname || member.user.username,
-    id: member.user.id,
-    status: member.presence?.status || 'offline',
-    joinedAt: member.joinedAt.toISOString()
-  }));
-
-  await csvWriter.writeRecords(records);
-  
-  const attachment = new AttachmentBuilder(csvPath);
-  await interaction.followUp({ 
-    content: '📊 Slayer member export:',
-    files: [attachment],
-    ephemeral: true
-  });
-  
-  fs.unlinkSync(csvPath); // Clean up
+  await interaction.reply({ embeds: [embed], ephemeral: true });
+  console.log(`[COMMAND] ${interaction.user.tag} requested Slayer list`);
 }
 
+// Command: /removeslayer
 async function handleRemoveSlayer(interaction) {
-  if (!interaction.member.roles.cache.has(process.env.HIGH_COMMAND_ROLE_ID)) {
-    return interaction.reply({ content: '❌ You do not have permission to use this command.', ephemeral: true });
+  if (!interaction.member.roles.cache.has(process.env.HIGH_COMMAND_ROLE)) {
+    return interaction.reply({ content: '❌ Insufficient permissions', ephemeral: true });
   }
 
-  const target = interaction.options.getMember('member');
+  const target = interaction.options.getMember('user');
   if (!target) {
-    return interaction.reply({ content: '❌ Member not found.', ephemeral: true });
+    return interaction.reply({ content: '❌ Member not found', ephemeral: true });
+  }
+
+  if (!target.roles.cache.has(process.env.SLAYER_ROLE)) {
+    return interaction.reply({ content: '❌ Target is not a Slayer', ephemeral: true });
   }
 
   try {
-    await target.roles.remove(process.env.SLAYER_ROLE_ID);
-    
-    // Send DM notification
+    // Remove role and registry entry
+    await target.roles.remove(process.env.SLAYER_ROLE);
+    slayerRegistry.delete(target.id);
+
+    // Notify target
     try {
       await target.send({
         embeds: [new EmbedBuilder()
           .setColor('#FF0000')
-          .setTitle('❌ Slayer Role Removed')
-          .setDescription('You are no longer part of the Slayer family.')
+          .setTitle('⚔️ Slayer Status Revoked')
+          .setDescription('Your Slayer role has been removed')
+          .addFields(
+            { name: 'By', value: interaction.user.toString() },
+            { name: 'Status at Removal', value: target.presence?.status?.toUpperCase() || 'OFFLINE' }
+          )
           .setTimestamp()
         ]
       });
     } catch (dmError) {
-      console.error('Failed to send DM:', dmError);
+      console.log(`[WARN] Could not DM ${target.user.tag}`);
     }
 
     // Log removal
-    const logChannel = client.channels.cache.get(process.env.ADMIN_LOG_CHANNEL_ID);
+    const logChannel = client.channels.cache.get(process.env.SLAYER_LOG_CHANNEL);
     if (logChannel) {
       await logChannel.send({
         embeds: [new EmbedBuilder()
           .setColor('#FF0000')
-          .setTitle('Slayer Role Removed')
-          .setDescription(`${target.toString()} was removed by ${interaction.user.toString()}`)
+          .setTitle('Slayer Removed')
+          .setDescription(`${target.toString()} was removed from the Slayers`)
           .addFields(
-            { name: 'Status at removal', value: target.presence?.status || 'offline' }
+            { name: 'By', value: interaction.user.toString() },
+            { name: 'Duration as Slayer', value: getDurationText(target.id, 'removed') }
           )
+          .setThumbnail(target.user.displayAvatarURL())
           .setTimestamp()
         ]
       });
@@ -319,69 +333,196 @@ async function handleRemoveSlayer(interaction) {
       content: `✅ Removed Slayer role from ${target.toString()}`,
       ephemeral: true 
     });
+    console.log(`[COMMAND] ${interaction.user.tag} removed ${target.user.tag} from Slayers`);
+
   } catch (error) {
-    console.error('Error removing role:', error);
-    await interaction.reply({ 
-      content: '❌ Failed to remove role', 
-      ephemeral: true 
-    });
+    console.error('[REMOVAL ERROR]', error);
+    await interaction.reply({ content: '❌ Failed to remove role', ephemeral: true });
   }
 }
 
-// =====================================
-// Startup and Monitoring
-// =====================================
-client.on('ready', () => {
-  console.log(`✅ ${client.user.tag} is online in ${client.guilds.cache.size} servers!`);
-  
-  // Initial presence logging
-  client.guilds.cache.forEach(guild => {
-    guild.members.fetch().then(members => {
-      members.forEach(member => {
-        if (!member.user.bot) {
-          console.log(`👤 ${member.user.tag}: ${member.presence?.status || 'offline'}`);
-        }
+// Command: /slayerstats
+async function handleSlayerStats(interaction) {
+  const slayers = (await interaction.guild.members.fetch())
+    .filter(m => m.roles.cache.has(process.env.SLAYER_ROLE));
+
+  const statusCount = {
+    online: 0,
+    idle: 0,
+    dnd: 0,
+    offline: 0
+  };
+
+  slayers.forEach(member => {
+    const status = member.presence?.status || 'offline';
+    statusCount[status]++;
+  });
+
+  const total = slayers.size;
+  const embed = new EmbedBuilder()
+    .setTitle('📊 Slayer Force Status')
+    .setColor('#00AAFF')
+    .addFields(
+      { name: 'Total Slayers', value: total.toString(), inline: true },
+      { name: '🟢 Online', value: statusCount.online.toString(), inline: true },
+      { name: '🟡 Idle', value: statusCount.idle.toString(), inline: true },
+      { name: '🔴 DND', value: statusCount.dnd.toString(), inline: true },
+      { name: '⚫ Offline', value: statusCount.offline.toString(), inline: true },
+      { name: 'Activity Rate', value: `${Math.round(((statusCount.online + statusCount.idle)/total)*100)}%`, inline: true }
+    )
+    .setTimestamp();
+
+  await interaction.reply({ embeds: [embed] });
+  console.log(`[COMMAND] ${interaction.user.tag} requested Slayer stats`);
+}
+
+// Command: /checkstatus
+async function handleCheckStatus(interaction) {
+  const member = interaction.options.getMember('user') || interaction.member;
+  const status = member.presence?.status || 'offline';
+  const history = statusHistory.get(member.id) || [];
+
+  const statusEmoji = {
+    online: '🟢',
+    idle: '🟡',
+    dnd: '🔴',
+    offline: '⚫'
+  }[status];
+
+  const embed = new EmbedBuilder()
+    .setTitle(`${statusEmoji || '⚪'} ${member.user.username}'s Status`)
+    .setColor(getStatusColor(status))
+    .addFields(
+      { name: 'Current Status', value: status.toUpperCase(), inline: true },
+      { name: 'Last Changed', value: history.length > 0 ? 
+        `<t:${Math.floor(history[history.length-1].timestamp/1000)}:R>` : 'Unknown', inline: true }
+    )
+    .setThumbnail(member.user.displayAvatarURL());
+
+  if (history.length > 1) {
+    const lastOnline = history.findLast(e => e.status === 'online');
+    if (lastOnline) {
+      embed.addFields({
+        name: 'Last Online',
+        value: `<t:${Math.floor(lastOnline.timestamp/1000)}:R>`,
+        inline: true
       });
-    });
-  });
-});
+    }
+  }
 
-client.login(process.env.TOKEN)
-  .then(() => console.log('🔑 Bot login initiated'))
-  .catch(err => {
-    console.error('❌ Login failed:', err);
-    process.exit(1);
-  });
+  await interaction.reply({ embeds: [embed], ephemeral: true });
+  console.log(`[COMMAND] ${interaction.user.tag} checked ${member.user.tag}'s status`);
+}
 
-// =====================================
-// Error Handling
-// =====================================
-process.on('unhandledRejection', error => {
-  console.error('❗ Unhandled rejection:', error);
-});
+// ======================
+// 7. UTILITY FUNCTIONS
+// ======================
+function getStatusColor(status) {
+  const colors = {
+    online: '#43B581',
+    idle: '#FAA61A',
+    dnd: '#F04747',
+    offline: '#747F8D'
+  };
+  return colors[status] || '#000000';
+}
 
-process.on('uncaughtException', error => {
-  console.error('❗ Uncaught exception:', error);
-});
-
-// =====================================
-// Graceful Shutdown
-// =====================================
-process.on('SIGTERM', () => {
-  console.log('🛑 Received SIGTERM. Shutting down gracefully...');
+// ======================
+// 8. BOT STARTUP
+// ======================
+client.on('ready', async () => {
+  console.log(`[BOT] ${client.user.tag} is online in ${client.guilds.cache.size} servers`);
   
-  const shutdownTasks = [
+  // Initial status scan
+  const guild = client.guilds.cache.first(); // Assuming one guild
+  const members = await guild.members.fetch();
+  
+  members.forEach(member => {
+    if (member.user.bot) return;
+    
+    const status = member.presence?.status || 'offline';
+    if (!statusHistory.has(member.id)) {
+      statusHistory.set(member.id, []);
+    }
+    statusHistory.get(member.id).push({
+      status,
+      timestamp: new Date()
+    });
+
+    // Log initial Slayer statuses
+    if (member.roles.cache.has(process.env.SLAYER_ROLE)) {
+      console.log(`[INIT] Slayer ${member.user.tag}: ${status.toUpperCase()}`);
+    }
+  });
+
+  // Register slash commands
+  const commands = [
+    new SlashCommandBuilder()
+      .setName('slayerlist')
+      .setDescription('List all Slayers with statuses'),
+    new SlashCommandBuilder()
+      .setName('removeslayer')
+      .setDescription('Remove Slayer role from a member')
+      .addUserOption(option =>
+        option.setName('user')
+          .setDescription('The member to remove')
+          .setRequired(true))
+      .setDefaultMemberPermissions(0),
+    new SlashCommandBuilder()
+      .setName('slayerstats')
+      .setDescription('Show current Slayer activity statistics'),
+    new SlashCommandBuilder()
+      .setName('checkstatus')
+      .setDescription("Check a member's status history")
+      .addUserOption(option =>
+        option.setName('user')
+          .setDescription('Member to check')
+          .setRequired(false))
+  ].map(cmd => cmd.toJSON());
+
+  try {
+    await client.application.commands.set(commands);
+    console.log('[BOT] Slash commands registered');
+  } catch (err) {
+    console.error('[ERROR] Command registration failed:', err);
+  }
+});
+
+// ======================
+// 9. ERROR HANDLING
+// ======================
+process.on('unhandledRejection', err => {
+  console.error('[UNHANDLED REJECTION]', err);
+});
+
+process.on('uncaughtException', err => {
+  console.error('[UNCAUGHT EXCEPTION]', err);
+});
+
+// ======================
+// 10. SHUTDOWN HANDLING
+// ======================
+process.on('SIGTERM', () => {
+  console.log('[SHUTDOWN] Initiating graceful shutdown...');
+  
+  Promise.all([
     new Promise(resolve => server.close(resolve)),
     client.destroy()
-  ];
-
-  Promise.all(shutdownTasks)
-    .then(() => {
-      console.log('✅ Services stopped successfully');
-      process.exit(0);
-    })
-    .catch(err => {
-      console.error('❌ Error during shutdown:', err);
-      process.exit(1);
-    });
+  ]).then(() => {
+    console.log('[SHUTDOWN] Completed successfully');
+    process.exit(0);
+  }).catch(err => {
+    console.error('[SHUTDOWN ERROR]', err);
+    process.exit(1);
+  });
 });
+
+// ======================
+// START THE BOT
+// ======================
+client.login(process.env.TOKEN)
+  .then(() => console.log('[BOT] Login successful'))
+  .catch(err => {
+    console.error('[LOGIN ERROR]', err);
+    process.exit(1);
+  });
