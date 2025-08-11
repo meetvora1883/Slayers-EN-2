@@ -1,11 +1,11 @@
 {
   "name": "discord-name-manager",
   "version": "1.0.0",
-  "description": "Bot for managing user names based on roles",
+  "description": "Discord bot for managing names with role integration",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "install-deps": "npm install discord.js dotenv csv-parser csv-writer"
   },
   "dependencies": {
     "discord.js": "^14.14.1",
