@@ -1,16 +1,30 @@
-// ====================
-// MODULE REQUIREMENTS
-// ====================
-const { Client, IntentsBitField, EmbedBuilder, AttachmentBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, SlashCommandBuilder } = require('discord.js');
-const dotenv = require('dotenv');
-const fs = require('fs');
-const csv = require('csv-parser');
+require('dotenv').config();
+const express = require('express');
+const { Client, IntentsBitField, EmbedBuilder, AttachmentBuilder, SlashCommandBuilder } = require('discord.js');
 const { createObjectCsvWriter } = require('csv-writer');
+const fs = require('fs');
 
-// ====================
-// INITIALIZATION
-// ====================
-dotenv.config();
+// Initialize Express app for Render.com port binding
+const app = express();
+const port = process.env.PORT || 10000;
+
+// Health check endpoint
+app.get('/', (req, res) => {
+  res.status(200).json({
+    status: 'online',
+    service: 'Discord Name Manager',
+    instance: process.env.RENDER_INSTANCE_ID || 'local',
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Start the web server
+const server = app.listen(port, () => {
+  console.log(`🖥️ Web server running on port ${port}`);
+  console.log(`🌐 Health check available at http://localhost:${port}`);
+});
+
+// Initialize Discord client
 const client = new Client({
   intents: [
     IntentsBitField.Flags.Guilds,
@@ -21,19 +35,14 @@ const client = new Client({
   ]
 });
 
-// ====================
-// CONSTANTS
-// ====================
+// Constants
 const RENDER_STATIC_IPS = ['52.41.36.82', '54.191.253.12', '44.226.122.3'];
 const nameChangeCooldowns = new Map();
-const lastSimilarNameWarning = new Map();
 const ID_REGEX = /(?:\bID\s*[:|-]\s*)(\d+)/i;
 const NAME_REGEX = /(?:\bName\s*[:|-]\s*)([^\n\r]+)/i;
 const RANK_REGEX = /(?:\bRank\s*[:|-]\s*)(\d+)/i;
 
-// ====================
-// HELPER FUNCTIONS
-// ====================
+// Helper Functions
 function validateNameFormat(content) {
   const nameMatch = content.match(NAME_REGEX);
   const idMatch = content.match(ID_REGEX);
@@ -62,21 +71,14 @@ async function checkDuplicateId(guild, id, userId) {
   return null;
 }
 
-// ====================
-// EVENT HANDLERS
-// ====================
-client.on('ready', async () => {
+// Discord Client Events
+client.on('ready', () => {
   console.log(`✅ ${client.user.tag} is online!`);
   console.log(`🌐 Static IPs: ${RENDER_STATIC_IPS.join(', ')}`);
-  console.log(`👀 Watching channel: ${process.env.ROLE_REQUEST_CHANNEL_ID}`);
+  console.log(`📊 Monitoring channel: ${process.env.ROLE_REQUEST_CHANNEL_ID}`);
 
   // Register slash commands
-  try {
-    await registerCommands();
-    console.log('🔧 Slash commands registered');
-  } catch (error) {
-    console.error('❌ Failed to register commands:', error);
-  }
+  registerCommands().then(() => console.log('🔧 Slash commands registered'));
 });
 
 async function registerCommands() {
@@ -87,7 +89,8 @@ async function registerCommands() {
     
     new SlashCommandBuilder()
       .setName('export_slayers')
-      .setDescription('Export Slayer members to CSV (High Command only)'),
+      .setDescription('Export Slayer members to CSV')
+      .setDefaultMemberPermissions(0),
     
     new SlashCommandBuilder()
       .setName('remove_slayer')
@@ -95,27 +98,19 @@ async function registerCommands() {
       .addUserOption(option =>
         option.setName('member')
           .setDescription('Member to remove role from')
-          .setRequired(true)),
-    
-    new SlashCommandBuilder()
-      .setName('dm_name_notice')
-      .setDescription('Send name format notice to all Slayers')
-      .addStringOption(option =>
-        option.setName('message')
-          .setDescription('Custom message to include')
-          .setRequired(false)),
+          .setRequired(true))
+      .setDefaultMemberPermissions(0),
     
     new SlashCommandBuilder()
       .setName('name_change_stats')
-      .setDescription('Get statistics on name changes')
+      .setDescription('Get name change statistics')
+      .setDefaultMemberPermissions(0)
   ].map(command => command.toJSON());
 
   await client.application.commands.set(commands);
 }
 
-// ====================
-// MESSAGE HANDLER (Name Change Requests)
-// ====================
+// Message Handler
 client.on('messageCreate', async (message) => {
   if (message.author.bot || message.channel.id !== process.env.ROLE_REQUEST_CHANNEL_ID) return;
 
@@ -151,7 +146,6 @@ client.on('messageCreate', async (message) => {
   const newNickname = `${name} | ${id}`;
   
   try {
-    // Set nickname and role
     await message.member.setNickname(newNickname);
     await message.member.roles.add(process.env.SLAYER_ROLE_ID);
 
@@ -189,7 +183,6 @@ client.on('messageCreate', async (message) => {
       });
     }
 
-    // Set cooldown
     nameChangeCooldowns.set(message.author.id, Date.now() + parseInt(process.env.NAME_CHANGE_COOLDOWN));
   } catch (error) {
     console.error('Error processing name change:', error);
@@ -197,9 +190,7 @@ client.on('messageCreate', async (message) => {
   }
 });
 
-// ====================
-// COMMAND HANDLERS
-// ====================
+// Command Handlers
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isCommand()) return;
 
@@ -214,9 +205,6 @@ client.on('interactionCreate', async (interaction) => {
       case 'remove_slayer':
         await handleRemoveSlayer(interaction);
         break;
-      case 'dm_name_notice':
-        await handleDMNotice(interaction);
-        break;
       case 'name_change_stats':
         await handleNameStats(interaction);
         break;
@@ -229,7 +217,6 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-// Command: /slayer_list
 async function handleSlayerList(interaction) {
   const members = await interaction.guild.members.fetch();
   const slayers = members.filter(m => m.roles.cache.has(process.env.SLAYER_ROLE_ID));
@@ -242,7 +229,6 @@ async function handleSlayerList(interaction) {
   await interaction.reply({ embeds: [embed] });
 }
 
-// Command: /export_slayers
 async function handleExportCommand(interaction) {
   if (!interaction.member.roles.cache.has(process.env.HIGH_COMMAND_ROLE_ID)) {
     return interaction.reply({ content: '❌ Insufficient permissions', ephemeral: true });
@@ -280,10 +266,9 @@ async function handleExportCommand(interaction) {
     content: `📊 Exported ${records.length} slayers`
   });
 
-  fs.unlinkSync(csvPath); // Clean up
+  fs.unlinkSync(csvPath);
 }
 
-// Command: /remove_slayer
 async function handleRemoveSlayer(interaction) {
   if (!interaction.member.roles.cache.has(process.env.HIGH_COMMAND_ROLE_ID)) {
     return interaction.reply({ content: '❌ Insufficient permissions', ephemeral: true });
@@ -295,7 +280,6 @@ async function handleRemoveSlayer(interaction) {
   try {
     await target.roles.remove(process.env.SLAYER_ROLE_ID);
     
-    // Send DM to removed member
     try {
       await target.send({
         embeds: [
@@ -311,7 +295,6 @@ async function handleRemoveSlayer(interaction) {
       console.error('Failed to send DM:', dmError);
     }
 
-    // Log removal
     const logChannel = client.channels.cache.get(process.env.ADMIN_LOG_CHANNEL_ID);
     if (logChannel) {
       await logChannel.send({
@@ -330,52 +313,6 @@ async function handleRemoveSlayer(interaction) {
   }
 }
 
-// Command: /dm_name_notice
-async function handleDMNotice(interaction) {
-  if (!interaction.member.roles.cache.has(process.env.HIGH_COMMAND_ROLE_ID)) {
-    return interaction.reply({ content: '❌ Insufficient permissions', ephemeral: true });
-  }
-
-  const customMessage = interaction.options.getString('message') || '';
-  const noticeMessage = `📢 **Name Format Reminder**\n\n` +
-    `All Slayers must use the correct name format:\n` +
-    `\`\`\`Name: Your Name\nID: 123456\nRank: 3\`\`\`\n` +
-    `${customMessage}`;
-
-  await interaction.deferReply({ ephemeral: true });
-
-  const members = await interaction.guild.members.fetch();
-  const slayers = members.filter(m => m.roles.cache.has(process.env.SLAYER_ROLE_ID));
-
-  let success = 0, failed = 0;
-  const failedMembers = [];
-
-  for (const member of slayers.values()) {
-    try {
-      await member.send(noticeMessage);
-      success++;
-    } catch (error) {
-      failed++;
-      failedMembers.push(member.toString());
-    }
-  }
-
-  await interaction.followUp({
-    embeds: [
-      new EmbedBuilder()
-        .setTitle('📨 DM Notice Results')
-        .setDescription(`Sent name format reminder to Slayers`)
-        .addFields(
-          { name: 'Successful', value: success.toString(), inline: true },
-          { name: 'Failed', value: failed.toString(), inline: true }
-        )
-        .setFooter({ text: failed > 0 ? `Couldn't DM: ${failedMembers.join(', ')}` : null })
-    ],
-    ephemeral: true
-  });
-}
-
-// Command: /name_change_stats
 async function handleNameStats(interaction) {
   if (!interaction.member.roles.cache.has(process.env.HIGH_COMMAND_ROLE_ID)) {
     return interaction.reply({ content: '❌ Insufficient permissions', ephemeral: true });
@@ -383,7 +320,6 @@ async function handleNameStats(interaction) {
 
   await interaction.deferReply({ ephemeral: true });
 
-  // In a real implementation, you would track these stats in a database
   const statsEmbed = new EmbedBuilder()
     .setTitle('📈 Name Change Statistics')
     .addFields(
@@ -396,9 +332,7 @@ async function handleNameStats(interaction) {
   await interaction.followUp({ embeds: [statsEmbed], ephemeral: true });
 }
 
-// ====================
-// ERROR HANDLING
-// ====================
+// Error Handling
 process.on('unhandledRejection', error => {
   console.error('Unhandled rejection:', error);
 });
@@ -407,7 +341,18 @@ process.on('uncaughtException', error => {
   console.error('Uncaught exception:', error);
 });
 
-// ====================
-// START BOT
-// ====================
-client.login(process.env.TOKEN);
+// Start Services
+client.login(process.env.TOKEN)
+  .then(() => console.log('🤖 Discord bot logged in'))
+  .catch(err => console.error('❌ Bot login failed:', err));
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('🛑 Received SIGTERM. Shutting down gracefully...');
+  server.close(() => {
+    console.log('🖥️ HTTP server closed');
+    client.destroy();
+    console.log('🤖 Discord client disconnected');
+    process.exit(0);
+  });
+});
